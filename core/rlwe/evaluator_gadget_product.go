@@ -113,6 +113,8 @@ func (eval Evaluator) GadgetProductLazy(levelQ int, cx ring.Poly, gadgetCt *Gadg
 
 	if gadgetCt.LevelP() > 0 {
 		eval.gadgetProductMultiplePLazy(levelQ, cx, gadgetCt, ctQP)
+	} else if gadgetCt.LevelP() == 0 && gadgetCt.BaseTwoDecomposition == 0 {
+		eval.gadgetProductSinglePNoBaseTwoLazy(levelQ, cx, gadgetCt, ctQP)
 	} else {
 		eval.gadgetProductSinglePAndBitDecompLazy(levelQ, cx, gadgetCt, ctQP)
 	}
@@ -145,6 +147,35 @@ func polyAliases(level int, p0, p1 ring.Poly) bool {
 	return false
 }
 
+func (eval Evaluator) gadgetProductInputDomains(levelQ int, cx ring.Poly, cxIsNTT bool, aliasesOut bool, ringQ *ring.Ring, pool *BufferPool) (cxNTT, cxInvNTT ring.Poly, buff0, buff1 *ring.Poly) {
+	if cxIsNTT {
+		cxNTT = cx
+		buff0 = pool.GetBuffPoly()
+		cxInvNTT = *buff0
+		ringQ.INTT(cxNTT, cxInvNTT)
+
+		if aliasesOut {
+			buff1 = pool.GetBuffPoly()
+			buff1.CopyLvl(levelQ, cx)
+			cxNTT = *buff1
+		}
+	} else {
+		cxInvNTT = cx
+
+		if aliasesOut {
+			buff0 = pool.GetBuffPoly()
+			buff0.CopyLvl(levelQ, cx)
+			cxInvNTT = *buff0
+		}
+
+		buff1 = pool.GetBuffPoly()
+		cxNTT = *buff1
+		ringQ.NTT(cxInvNTT, cxNTT)
+	}
+
+	return
+}
+
 func (eval Evaluator) gadgetProductMultiplePLazy(levelQ int, cx ring.Poly, gadgetCt *GadgetCiphertext, ctQP *Element[ringqp.Poly]) {
 
 	levelP := gadgetCt.LevelP()
@@ -160,35 +191,13 @@ func (eval Evaluator) gadgetProductMultiplePLazy(levelQ int, cx ring.Poly, gadge
 
 	c2QP := *buff
 
-	buffQ := poolQP.GetBuffPoly()
-	defer poolQP.RecycleBuffPoly(buffQ)
-
 	cxAliasesOut := gadgetProductInputAliasesOutput(levelQ, cx, ctQP)
-
-	var cxNTT, cxInvNTT ring.Poly
-	if ctQP.IsNTT {
-		cxNTT = cx
-		cxInvNTT = *buffQ
-		ringQ.INTT(cxNTT, cxInvNTT)
-
-		if cxAliasesOut {
-			cxNTTBuff := poolQP.GetBuffPoly()
-			defer poolQP.RecycleBuffPoly(cxNTTBuff)
-			cxNTTBuff.CopyLvl(levelQ, cx)
-			cxNTT = *cxNTTBuff
-		}
-	} else {
-		cxNTT = *buffQ
-		cxInvNTT = cx
-
-		if cxAliasesOut {
-			cxInvNTTBuff := poolQP.GetBuffPoly()
-			defer poolQP.RecycleBuffPoly(cxInvNTTBuff)
-			cxInvNTTBuff.CopyLvl(levelQ, cx)
-			cxInvNTT = *cxInvNTTBuff
-		}
-
-		ringQ.NTT(cxInvNTT, cxNTT)
+	cxNTT, cxInvNTT, buff0, buff1 := eval.gadgetProductInputDomains(levelQ, cx, ctQP.IsNTT, cxAliasesOut, ringQ, poolQP)
+	if buff0 != nil {
+		defer poolQP.RecycleBuffPoly(buff0)
+	}
+	if buff1 != nil {
+		defer poolQP.RecycleBuffPoly(buff1)
 	}
 
 	BaseRNSDecompositionVectorSize := eval.params.BaseRNSDecompositionVectorSize(levelQ, levelP)
@@ -203,6 +212,72 @@ func (eval Evaluator) gadgetProductMultiplePLazy(levelQ int, cx ring.Poly, gadge
 	for i := 0; i < BaseRNSDecompositionVectorSize; i++ {
 
 		eval.DecomposeSingleNTT(levelQ, levelP, levelP+1, i, cxNTT, cxInvNTT, c2QP.Q, c2QP.P)
+
+		if i == 0 {
+			ringQP.MulCoeffsMontgomeryLazy(el[i][0][0], c2QP, ctQP.Value[0])
+			ringQP.MulCoeffsMontgomeryLazy(el[i][0][1], c2QP, ctQP.Value[1])
+		} else {
+			ringQP.MulCoeffsMontgomeryLazyThenAddLazy(el[i][0][0], c2QP, ctQP.Value[0])
+			ringQP.MulCoeffsMontgomeryLazyThenAddLazy(el[i][0][1], c2QP, ctQP.Value[1])
+		}
+
+		if reduce%QiOverF == QiOverF-1 {
+			ringQ.Reduce(ctQP.Value[0].Q, ctQP.Value[0].Q)
+			ringQ.Reduce(ctQP.Value[1].Q, ctQP.Value[1].Q)
+		}
+
+		if reduce%PiOverF == PiOverF-1 {
+			ringP.Reduce(ctQP.Value[0].P, ctQP.Value[0].P)
+			ringP.Reduce(ctQP.Value[1].P, ctQP.Value[1].P)
+		}
+
+		reduce++
+	}
+
+	if reduce%QiOverF != 0 {
+		ringQ.Reduce(ctQP.Value[0].Q, ctQP.Value[0].Q)
+		ringQ.Reduce(ctQP.Value[1].Q, ctQP.Value[1].Q)
+	}
+
+	if reduce%PiOverF != 0 {
+		ringP.Reduce(ctQP.Value[0].P, ctQP.Value[0].P)
+		ringP.Reduce(ctQP.Value[1].P, ctQP.Value[1].P)
+	}
+}
+
+func (eval Evaluator) gadgetProductSinglePNoBaseTwoLazy(levelQ int, cx ring.Poly, gadgetCt *GadgetCiphertext, ctQP *Element[ringqp.Poly]) {
+
+	const levelP = 0
+
+	ringQP := eval.params.RingQP().AtLevel(levelQ, levelP)
+	poolQP := eval.pool.AtLevel(levelQ, levelP)
+
+	ringQ := ringQP.RingQ
+	ringP := ringQP.RingP
+
+	buff := poolQP.GetBuffPolyQP()
+	defer poolQP.RecycleBuffPolyQP(buff)
+
+	c2QP := *buff
+
+	cxAliasesOut := gadgetProductInputAliasesOutput(levelQ, cx, ctQP)
+	cxNTT, cxInvNTT, buff0, buff1 := eval.gadgetProductInputDomains(levelQ, cx, ctQP.IsNTT, cxAliasesOut, ringQ, poolQP)
+	if buff0 != nil {
+		defer poolQP.RecycleBuffPoly(buff0)
+	}
+	if buff1 != nil {
+		defer poolQP.RecycleBuffPoly(buff1)
+	}
+
+	QiOverF := eval.params.QiOverflowMargin(levelQ) >> 1
+	PiOverF := eval.params.PiOverflowMargin(levelP) >> 1
+
+	el := gadgetCt.Value
+
+	var reduce int
+	for i := 0; i < levelQ+1; i++ {
+
+		eval.decomposeSinglePNoBaseTwoNTT(levelQ, i, c2QP.Q, c2QP.P, cxNTT, cxInvNTT, true)
 
 		if i == 0 {
 			ringQP.MulCoeffsMontgomeryLazy(el[i][0][0], c2QP, ctQP.Value[0])
@@ -509,6 +584,62 @@ func (eval Evaluator) gadgetProductMultiplePLazyHoisted(levelQ int, BuffQPDecomp
 	}
 }
 
+func (eval Evaluator) decomposeSinglePNoBaseTwoNTT(levelQ, qi int, c2QiQ, c2QiP, c2NTT, c2InvNTT ring.Poly, lazy bool) {
+
+	ringQ := eval.params.RingQ().AtLevel(levelQ)
+	ringP := eval.params.RingP().AtLevel(0)
+
+	Q := ringQ.ModuliChain()
+	BRCQ := ringQ.BRedConstants()
+	P := ringP.ModuliChain()
+	BRCP := ringP.BRedConstants()
+
+	q := Q[qi]
+	coeffs := c2InvNTT.Coeffs[qi]
+
+	for j := 0; j < ringQ.N(); j++ {
+
+		coeff := coeffs[j]
+		pos, neg := uint64(1), uint64(0)
+		if coeff >= (q >> 1) {
+			coeff = q - coeff
+			pos, neg = 0, 1
+		}
+
+		for u := 0; u < levelQ+1; u++ {
+			if u == qi {
+				continue
+			}
+
+			tmp := ring.BRedAdd(coeff, Q[u], BRCQ[u])
+			c2QiQ.Coeffs[u][j] = tmp*pos + (Q[u]-tmp)*neg
+		}
+
+		tmp := ring.BRedAdd(coeff, P[0], BRCP[0])
+		c2QiP.Coeffs[0][j] = tmp*pos + (P[0]-tmp)*neg
+	}
+
+	copy(c2QiQ.Coeffs[qi], c2NTT.Coeffs[qi])
+
+	for u, s := range ringQ.SubRings[:levelQ+1] {
+		if u == qi {
+			continue
+		}
+
+		if lazy {
+			s.NTTLazy(c2QiQ.Coeffs[u], c2QiQ.Coeffs[u])
+		} else {
+			s.NTT(c2QiQ.Coeffs[u], c2QiQ.Coeffs[u])
+		}
+	}
+
+	if lazy {
+		ringP.NTTLazy(c2QiP, c2QiP)
+	} else {
+		ringP.NTT(c2QiP, c2QiP)
+	}
+}
+
 // DecomposeNTT applies the full RNS basis decomposition on c2.
 // Expects the IsNTT flag of c2 to correctly reflect the domain of c2.
 // BuffQPDecompQ and BuffQPDecompQ are vectors of polynomials (mod Q and mod P) that store the
@@ -542,6 +673,11 @@ func (eval Evaluator) DecomposeNTT(levelQ, levelP, nbPi int, c2 ring.Poly, c2IsN
 // DecomposeSingleNTT takes the input polynomial c2 (c2NTT and c2InvNTT, respectively in the NTT and out of the NTT domain)
 // modulo the RNS basis, and returns the result on c2QiQ and c2QiP, the receiver polynomials respectively mod Q and mod P (in the NTT domain)
 func (eval Evaluator) DecomposeSingleNTT(levelQ, levelP, nbPi, BaseRNSDecompositionVectorSize int, c2NTT, c2InvNTT, c2QiQ, c2QiP ring.Poly) {
+
+	if levelP == 0 && nbPi == 1 {
+		eval.decomposeSinglePNoBaseTwoNTT(levelQ, BaseRNSDecompositionVectorSize, c2QiQ, c2QiP, c2NTT, c2InvNTT, false)
+		return
+	}
 
 	ringQ := eval.params.RingQ().AtLevel(levelQ)
 	ringP := eval.params.RingP().AtLevel(levelP)

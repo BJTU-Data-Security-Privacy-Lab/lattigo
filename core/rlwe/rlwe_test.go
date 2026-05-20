@@ -192,6 +192,7 @@ func TestGadgetProductSinglePNoBaseTwoDecomposition(t *testing.T) {
 			require.NoError(t, err)
 
 			for _, level := range []int{0, params.MaxLevel()}[:] {
+				testDecomposeSinglePNoBaseTwoAgainstReference(tc, level, t)
 				testGadgetProduct(tc, level, 0, t)
 				testGadgetProductInputOutputAlias(tc, level, t)
 			}
@@ -803,6 +804,65 @@ func testGadgetProduct(tc *TestContext, levelQ, bpw2 int, t *testing.T) {
 	}
 }
 
+func testDecomposeSinglePNoBaseTwoAgainstReference(tc *TestContext, levelQ int, t *testing.T) {
+
+	params := tc.params
+	eval := tc.eval
+
+	ringQP := params.RingQP().AtLevel(levelQ, 0)
+	ringQ := ringQP.RingQ
+	ringP := ringQP.RingP
+
+	prng, _ := sampling.NewKeyedPRNG([]byte{'d', 'e', 'c', 'o', 'm', 'p'})
+	sampler := ring.NewUniformSampler(prng, ringQ)
+
+	for _, c2IsNTT := range []bool{true, false} {
+
+		t.Run(fmt.Sprintf("%s/InputNTT=%t", testString(params, levelQ, 0, 0, "Evaluator/DecomposeSingleNTT/Reference"), c2IsNTT), func(t *testing.T) {
+
+			var c2NTT, c2InvNTT ring.Poly
+			if c2IsNTT {
+				c2NTT = sampler.ReadNew()
+				c2InvNTT = ringQ.NewPoly()
+				ringQ.INTT(c2NTT, c2InvNTT)
+			} else {
+				c2InvNTT = sampler.ReadNew()
+				c2NTT = ringQ.NewPoly()
+				ringQ.NTT(c2InvNTT, c2NTT)
+			}
+
+			for i := 0; i < levelQ+1; i++ {
+				have := ringQP.NewPoly()
+				want := ringQP.NewPoly()
+
+				eval.DecomposeSingleNTT(levelQ, 0, 1, i, c2NTT, c2InvNTT, have.Q, have.P)
+				decomposeSinglePNoBaseTwoReference(params, levelQ, i, c2NTT, c2InvNTT, want.Q, want.P)
+
+				require.True(t, ringQ.Equal(have.Q, want.Q))
+				require.True(t, ringP.Equal(have.P, want.P))
+			}
+		})
+	}
+}
+
+func decomposeSinglePNoBaseTwoReference(params Parameters, levelQ, qi int, c2NTT, c2InvNTT, c2QiQ, c2QiP ring.Poly) {
+
+	ringQ := params.RingQ().AtLevel(levelQ)
+	ringP := params.RingP().AtLevel(0)
+
+	ring.NewDecomposer(params.RingQ(), params.RingP()).DecomposeAndSplit(levelQ, 0, 1, qi, c2InvNTT, c2QiQ, c2QiP)
+
+	for u, s := range ringQ.SubRings[:levelQ+1] {
+		if u == qi {
+			copy(c2QiQ.Coeffs[u], c2NTT.Coeffs[u])
+		} else {
+			s.NTT(c2QiQ.Coeffs[u], c2QiQ.Coeffs[u])
+		}
+	}
+
+	ringP.NTT(c2QiP, c2QiP)
+}
+
 func testGadgetProductInputOutputAlias(tc *TestContext, levelQ int, t *testing.T) {
 
 	params := tc.params
@@ -815,35 +875,38 @@ func testGadgetProductInputOutputAlias(tc *TestContext, levelQ int, t *testing.T
 	prng, _ := sampling.NewKeyedPRNG([]byte{'a', 'l', 'i', 'a', 's'})
 	sampler := ring.NewUniformSampler(prng, ringQ)
 
-	t.Run(testString(params, levelQ, 0, 0, "Evaluator/GadgetProduct/InputOutputAlias"), func(t *testing.T) {
+	for _, inputIndex := range []int{0, 1} {
 
-		skOut := kgen.GenSecretKeyNew()
+		t.Run(fmt.Sprintf("%s/InputIndex=%d", testString(params, levelQ, 0, 0, "Evaluator/GadgetProduct/InputOutputAlias"), inputIndex), func(t *testing.T) {
 
-		ct := NewCiphertext(params, 1, levelQ)
-		sampler.Read(ct.Value[1])
-		a := *ct.Value[1].CopyNew()
+			skOut := kgen.GenSecretKeyNew()
 
-		evk := NewEvaluationKey(params, EvaluationKeyParameters{
-			LevelQ:               utils.Pointy(levelQ),
-			LevelP:               utils.Pointy(0),
-			BaseTwoDecomposition: utils.Pointy(0),
+			ct := NewCiphertext(params, 1, levelQ)
+			sampler.Read(ct.Value[inputIndex])
+			a := *ct.Value[inputIndex].CopyNew()
+
+			evk := NewEvaluationKey(params, EvaluationKeyParameters{
+				LevelQ:               utils.Pointy(levelQ),
+				LevelP:               utils.Pointy(0),
+				BaseTwoDecomposition: utils.Pointy(0),
+			})
+
+			kgen.GenEvaluationKey(sk, skOut, evk)
+			eval.GadgetProduct(levelQ, ct.Value[inputIndex], &evk.GadgetCiphertext, ct)
+
+			pt := NewDecryptor(params, skOut).DecryptNew(ct)
+
+			if !pt.IsNTT {
+				ringQ.NTT(pt.Value, pt.Value)
+				ringQ.NTT(a, a)
+			}
+
+			ringQ.MulCoeffsMontgomeryThenSub(a, sk.Value.Q, pt.Value)
+			ringQ.INTT(pt.Value, pt.Value)
+
+			require.GreaterOrEqual(t, float64(params.LogN()), ringQ.Log2OfStandardDeviation(pt.Value))
 		})
-
-		kgen.GenEvaluationKey(sk, skOut, evk)
-		eval.GadgetProduct(levelQ, ct.Value[1], &evk.GadgetCiphertext, ct)
-
-		pt := NewDecryptor(params, skOut).DecryptNew(ct)
-
-		if !pt.IsNTT {
-			ringQ.NTT(pt.Value, pt.Value)
-			ringQ.NTT(a, a)
-		}
-
-		ringQ.MulCoeffsMontgomeryThenSub(a, sk.Value.Q, pt.Value)
-		ringQ.INTT(pt.Value, pt.Value)
-
-		require.GreaterOrEqual(t, float64(params.LogN()), ringQ.Log2OfStandardDeviation(pt.Value))
-	})
+	}
 }
 
 func testApplyEvaluationKey(tc *TestContext, level, bpw2 int, t *testing.T) {
