@@ -316,7 +316,7 @@ func evalPhase(params bgv.Parameters, NGoRoutine int, encInputs []*rlwe.Cipherte
 	for nLvl := len(encInputs) / 2; nLvl > 0; nLvl = nLvl >> 1 {
 		encLvl := make([]*rlwe.Ciphertext, nLvl)
 		for i := range encLvl {
-			encLvl[i] = bgv.NewCiphertext(params, 2, params.MaxLevel())
+			encLvl[i] = bgv.NewCiphertext(params, 1, params.MaxLevel())
 		}
 		encLvls = append(encLvls, encLvl)
 	}
@@ -326,7 +326,7 @@ func evalPhase(params bgv.Parameters, NGoRoutine int, encInputs []*rlwe.Cipherte
 	evaluator := bgv.NewEvaluator(params, evk, true)
 
 	// Split the task among the Go routines
-	// A multTask is a task that multiplies two ciphertexts and relinearizes the result
+	// A multTask is a task that multiplies two ciphertexts with relinearization.
 	type multTask struct {
 		wg              *sync.WaitGroup
 		op1             *rlwe.Ciphertext
@@ -343,11 +343,8 @@ func evalPhase(params bgv.Parameters, NGoRoutine int, encInputs []*rlwe.Cipherte
 			evaluator := evaluator
 			for task := range tasks {
 				task.elapsedmultTask = runTimed(func() {
-					// 1) Multiplication of two input vectors
-					err := evaluator.Mul(task.op1, task.opOut, task.res)
-					check(err)
-					// 2) Relinearization
-					err = evaluator.Relinearize(task.res, task.res)
+					// Multiplication of two input vectors with relinearization.
+					err := evaluator.MulRelin(task.op1, task.opOut, task.res)
 					check(err)
 
 				})

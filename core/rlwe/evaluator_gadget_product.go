@@ -259,7 +259,6 @@ func (eval Evaluator) gadgetProductSinglePAndBitDecompLazy(levelQ int, cx ring.P
 
 			if mask != 0 {
 				ring.MaskVec(cxInvNTT.Coeffs[i], j*pw2, mask, cw)
-				ring.MaskVec(cxInvNTT.Coeffs[i], j*pw2, mask, cw)
 			}
 
 			if i == 0 && j == 0 {
