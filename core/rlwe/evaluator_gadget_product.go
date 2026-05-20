@@ -255,11 +255,6 @@ func (eval Evaluator) gadgetProductSinglePNoBaseTwoLazy(levelQ int, cx ring.Poly
 	ringQ := ringQP.RingQ
 	ringP := ringQP.RingP
 
-	buff := poolQP.GetBuffPolyQP()
-	defer poolQP.RecycleBuffPolyQP(buff)
-
-	c2QP := *buff
-
 	cxAliasesOut := gadgetProductInputAliasesOutput(levelQ, cx, ctQP)
 	cxNTT, cxInvNTT, buff0, buff1 := eval.gadgetProductInputDomains(levelQ, cx, ctQP.IsNTT, cxAliasesOut, ringQ, poolQP)
 	if buff0 != nil {
@@ -272,42 +267,90 @@ func (eval Evaluator) gadgetProductSinglePNoBaseTwoLazy(levelQ int, cx ring.Poly
 	QiOverF := eval.params.QiOverflowMargin(levelQ) >> 1
 	PiOverF := eval.params.PiOverflowMargin(levelP) >> 1
 
+	Q := ringQ.ModuliChain()
+	BRCQ := ringQ.BRedConstants()
+	P := ringP.ModuliChain()
+	BRCP := ringP.BRedConstants()
+
+	cwBuff := eval.pool.GetBuffUintArray()
+	defer eval.pool.RecycleBuffUintArray(cwBuff)
+	cw := *cwBuff
+
 	el := gadgetCt.Value
+	ct0QP := ctQP.Value[0]
+	ct1QP := ctQP.Value[1]
 
 	var reduce int
 	for i := 0; i < levelQ+1; i++ {
 
-		eval.decomposeSinglePNoBaseTwoNTT(levelQ, i, c2QP.Q, c2QP.P, cxNTT, cxInvNTT, true)
+		coeffs := cxInvNTT.Coeffs[i]
+		q := Q[i]
+		half := q >> 1
+		gct0 := el[i][0][0]
+		gct1 := el[i][0][1]
+
+		for u, s := range ringQ.SubRings[:levelQ+1] {
+			cwNTT := cxNTT.Coeffs[i]
+			if u != i {
+				centeredSinglePNoBaseTwoLimb(coeffs, q, half, Q[u], BRCQ[u], cw)
+				s.NTTLazy(cw, cw)
+				cwNTT = cw
+			}
+
+			if i == 0 {
+				s.MulCoeffsMontgomeryLazy(gct0.Q.Coeffs[u], cwNTT, ct0QP.Q.Coeffs[u])
+				s.MulCoeffsMontgomeryLazy(gct1.Q.Coeffs[u], cwNTT, ct1QP.Q.Coeffs[u])
+			} else {
+				s.MulCoeffsMontgomeryLazyThenAddLazy(gct0.Q.Coeffs[u], cwNTT, ct0QP.Q.Coeffs[u])
+				s.MulCoeffsMontgomeryLazyThenAddLazy(gct1.Q.Coeffs[u], cwNTT, ct1QP.Q.Coeffs[u])
+			}
+		}
+
+		centeredSinglePNoBaseTwoLimb(coeffs, q, half, P[0], BRCP[0], cw)
+		ringP.SubRings[0].NTTLazy(cw, cw)
 
 		if i == 0 {
-			ringQP.MulCoeffsMontgomeryLazy(el[i][0][0], c2QP, ctQP.Value[0])
-			ringQP.MulCoeffsMontgomeryLazy(el[i][0][1], c2QP, ctQP.Value[1])
+			ringP.SubRings[0].MulCoeffsMontgomeryLazy(gct0.P.Coeffs[0], cw, ct0QP.P.Coeffs[0])
+			ringP.SubRings[0].MulCoeffsMontgomeryLazy(gct1.P.Coeffs[0], cw, ct1QP.P.Coeffs[0])
 		} else {
-			ringQP.MulCoeffsMontgomeryLazyThenAddLazy(el[i][0][0], c2QP, ctQP.Value[0])
-			ringQP.MulCoeffsMontgomeryLazyThenAddLazy(el[i][0][1], c2QP, ctQP.Value[1])
+			ringP.SubRings[0].MulCoeffsMontgomeryLazyThenAddLazy(gct0.P.Coeffs[0], cw, ct0QP.P.Coeffs[0])
+			ringP.SubRings[0].MulCoeffsMontgomeryLazyThenAddLazy(gct1.P.Coeffs[0], cw, ct1QP.P.Coeffs[0])
 		}
 
 		if reduce%QiOverF == QiOverF-1 {
-			ringQ.Reduce(ctQP.Value[0].Q, ctQP.Value[0].Q)
-			ringQ.Reduce(ctQP.Value[1].Q, ctQP.Value[1].Q)
+			ringQ.Reduce(ct0QP.Q, ct0QP.Q)
+			ringQ.Reduce(ct1QP.Q, ct1QP.Q)
 		}
 
 		if reduce%PiOverF == PiOverF-1 {
-			ringP.Reduce(ctQP.Value[0].P, ctQP.Value[0].P)
-			ringP.Reduce(ctQP.Value[1].P, ctQP.Value[1].P)
+			ringP.Reduce(ct0QP.P, ct0QP.P)
+			ringP.Reduce(ct1QP.P, ct1QP.P)
 		}
 
 		reduce++
 	}
 
 	if reduce%QiOverF != 0 {
-		ringQ.Reduce(ctQP.Value[0].Q, ctQP.Value[0].Q)
-		ringQ.Reduce(ctQP.Value[1].Q, ctQP.Value[1].Q)
+		ringQ.Reduce(ct0QP.Q, ct0QP.Q)
+		ringQ.Reduce(ct1QP.Q, ct1QP.Q)
 	}
 
 	if reduce%PiOverF != 0 {
-		ringP.Reduce(ctQP.Value[0].P, ctQP.Value[0].P)
-		ringP.Reduce(ctQP.Value[1].P, ctQP.Value[1].P)
+		ringP.Reduce(ct0QP.P, ct0QP.P)
+		ringP.Reduce(ct1QP.P, ct1QP.P)
+	}
+}
+
+func centeredSinglePNoBaseTwoLimb(coeffs []uint64, q, half, modulus uint64, bred [2]uint64, out []uint64) {
+	for j, coeff := range coeffs {
+		pos, neg := uint64(1), uint64(0)
+		if coeff >= half {
+			coeff = q - coeff
+			pos, neg = 0, 1
+		}
+
+		tmp := ring.BRedAdd(coeff, modulus, bred)
+		out[j] = tmp*pos + (modulus-tmp)*neg
 	}
 }
 

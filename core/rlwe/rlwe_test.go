@@ -193,6 +193,7 @@ func TestGadgetProductSinglePNoBaseTwoDecomposition(t *testing.T) {
 
 			for _, level := range []int{0, params.MaxLevel()}[:] {
 				testDecomposeSinglePNoBaseTwoAgainstReference(tc, level, t)
+				testGadgetProductSinglePNoBaseTwoAgainstReference(tc, level, t)
 				testGadgetProduct(tc, level, 0, t)
 				testGadgetProductInputOutputAlias(tc, level, t)
 			}
@@ -861,6 +862,113 @@ func decomposeSinglePNoBaseTwoReference(params Parameters, levelQ, qi int, c2NTT
 	}
 
 	ringP.NTT(c2QiP, c2QiP)
+}
+
+func testGadgetProductSinglePNoBaseTwoAgainstReference(tc *TestContext, levelQ int, t *testing.T) {
+
+	params := tc.params
+	eval := tc.eval
+
+	ringQ := params.RingQ().AtLevel(levelQ)
+
+	prng, _ := sampling.NewKeyedPRNG([]byte{'f', 'u', 's', 'e', 'd'})
+	sampler := ring.NewUniformSampler(prng, ringQ)
+
+	t.Run(testString(params, levelQ, 0, 0, "Evaluator/GadgetProduct/FusedReference"), func(t *testing.T) {
+
+		cx := sampler.ReadNew()
+		if params.NTTFlag() {
+			ringQ.NTT(cx, cx)
+		}
+
+		skOut := tc.kgen.GenSecretKeyNew()
+		evk := NewEvaluationKey(params, EvaluationKeyParameters{
+			LevelQ:               utils.Pointy(levelQ),
+			LevelP:               utils.Pointy(0),
+			BaseTwoDecomposition: utils.Pointy(0),
+		})
+		tc.kgen.GenEvaluationKey(tc.sk, skOut, evk)
+
+		have := NewElementExtended(params, 1, levelQ, 0)
+		want := NewElementExtended(params, 1, levelQ, 0)
+
+		require.NoError(t, eval.GadgetProductLazy(levelQ, cx, &evk.GadgetCiphertext, have))
+		gadgetProductSinglePNoBaseTwoReferenceLazy(eval, levelQ, cx, &evk.GadgetCiphertext, want)
+
+		require.True(t, have.Value[0].Equal(&want.Value[0]))
+		require.True(t, have.Value[1].Equal(&want.Value[1]))
+	})
+}
+
+func gadgetProductSinglePNoBaseTwoReferenceLazy(eval *Evaluator, levelQ int, cx ring.Poly, gadgetCt *GadgetCiphertext, ctQP *Element[ringqp.Poly]) {
+
+	const levelP = 0
+
+	ringQP := eval.params.RingQP().AtLevel(levelQ, levelP)
+	poolQP := eval.pool.AtLevel(levelQ, levelP)
+
+	ringQ := ringQP.RingQ
+	ringP := ringQP.RingP
+
+	buff := poolQP.GetBuffPolyQP()
+	defer poolQP.RecycleBuffPolyQP(buff)
+
+	c2QP := *buff
+
+	cxAliasesOut := gadgetProductInputAliasesOutput(levelQ, cx, ctQP)
+	cxNTT, cxInvNTT, buff0, buff1 := eval.gadgetProductInputDomains(levelQ, cx, ctQP.IsNTT, cxAliasesOut, ringQ, poolQP)
+	if buff0 != nil {
+		defer poolQP.RecycleBuffPoly(buff0)
+	}
+	if buff1 != nil {
+		defer poolQP.RecycleBuffPoly(buff1)
+	}
+
+	QiOverF := eval.params.QiOverflowMargin(levelQ) >> 1
+	PiOverF := eval.params.PiOverflowMargin(levelP) >> 1
+
+	el := gadgetCt.Value
+
+	var reduce int
+	for i := 0; i < levelQ+1; i++ {
+
+		eval.decomposeSinglePNoBaseTwoNTT(levelQ, i, c2QP.Q, c2QP.P, cxNTT, cxInvNTT, true)
+
+		if i == 0 {
+			ringQP.MulCoeffsMontgomeryLazy(el[i][0][0], c2QP, ctQP.Value[0])
+			ringQP.MulCoeffsMontgomeryLazy(el[i][0][1], c2QP, ctQP.Value[1])
+		} else {
+			ringQP.MulCoeffsMontgomeryLazyThenAddLazy(el[i][0][0], c2QP, ctQP.Value[0])
+			ringQP.MulCoeffsMontgomeryLazyThenAddLazy(el[i][0][1], c2QP, ctQP.Value[1])
+		}
+
+		if reduce%QiOverF == QiOverF-1 {
+			ringQ.Reduce(ctQP.Value[0].Q, ctQP.Value[0].Q)
+			ringQ.Reduce(ctQP.Value[1].Q, ctQP.Value[1].Q)
+		}
+
+		if reduce%PiOverF == PiOverF-1 {
+			ringP.Reduce(ctQP.Value[0].P, ctQP.Value[0].P)
+			ringP.Reduce(ctQP.Value[1].P, ctQP.Value[1].P)
+		}
+
+		reduce++
+	}
+
+	if reduce%QiOverF != 0 {
+		ringQ.Reduce(ctQP.Value[0].Q, ctQP.Value[0].Q)
+		ringQ.Reduce(ctQP.Value[1].Q, ctQP.Value[1].Q)
+	}
+
+	if reduce%PiOverF != 0 {
+		ringP.Reduce(ctQP.Value[0].P, ctQP.Value[0].P)
+		ringP.Reduce(ctQP.Value[1].P, ctQP.Value[1].P)
+	}
+
+	if !ctQP.IsNTT {
+		ringQP.INTT(ctQP.Value[0], ctQP.Value[0])
+		ringQP.INTT(ctQP.Value[1], ctQP.Value[1])
+	}
 }
 
 func testGadgetProductInputOutputAlias(tc *TestContext, levelQ int, t *testing.T) {
