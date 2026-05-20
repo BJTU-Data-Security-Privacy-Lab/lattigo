@@ -126,6 +126,25 @@ func (eval Evaluator) GadgetProductLazy(levelQ int, cx ring.Poly, gadgetCt *Gadg
 	return
 }
 
+func gadgetProductInputAliasesOutput(levelQ int, cx ring.Poly, ctQP *Element[ringqp.Poly]) bool {
+	return polyAliases(levelQ, cx, ctQP.Value[0].Q) || polyAliases(levelQ, cx, ctQP.Value[1].Q)
+}
+
+func polyAliases(level int, p0, p1 ring.Poly) bool {
+	for i := 0; i < level+1; i++ {
+		p0Coeffs := p0.Coeffs[i]
+		if len(p0Coeffs) == 0 {
+			continue
+		}
+
+		if p1Coeffs := p1.Coeffs[i]; len(p1Coeffs) != 0 && &p0Coeffs[0] == &p1Coeffs[0] {
+			return true
+		}
+	}
+
+	return false
+}
+
 func (eval Evaluator) gadgetProductMultiplePLazy(levelQ int, cx ring.Poly, gadgetCt *GadgetCiphertext, ctQP *Element[ringqp.Poly]) {
 
 	levelP := gadgetCt.LevelP()
@@ -144,14 +163,31 @@ func (eval Evaluator) gadgetProductMultiplePLazy(levelQ int, cx ring.Poly, gadge
 	buffQ := poolQP.GetBuffPoly()
 	defer poolQP.RecycleBuffPoly(buffQ)
 
+	cxAliasesOut := gadgetProductInputAliasesOutput(levelQ, cx, ctQP)
+
 	var cxNTT, cxInvNTT ring.Poly
 	if ctQP.IsNTT {
 		cxNTT = cx
 		cxInvNTT = *buffQ
 		ringQ.INTT(cxNTT, cxInvNTT)
+
+		if cxAliasesOut {
+			cxNTTBuff := poolQP.GetBuffPoly()
+			defer poolQP.RecycleBuffPoly(cxNTTBuff)
+			cxNTTBuff.CopyLvl(levelQ, cx)
+			cxNTT = *cxNTTBuff
+		}
 	} else {
 		cxNTT = *buffQ
 		cxInvNTT = cx
+
+		if cxAliasesOut {
+			cxInvNTTBuff := poolQP.GetBuffPoly()
+			defer poolQP.RecycleBuffPoly(cxInvNTTBuff)
+			cxInvNTTBuff.CopyLvl(levelQ, cx)
+			cxInvNTT = *cxInvNTTBuff
+		}
+
 		ringQ.NTT(cxInvNTT, cxNTT)
 	}
 
@@ -218,6 +254,13 @@ func (eval Evaluator) gadgetProductSinglePAndBitDecompLazy(levelQ int, cx ring.P
 		ringQ.INTT(cx, cxInvNTT)
 	} else {
 		cxInvNTT = cx
+
+		if gadgetProductInputAliasesOutput(levelQ, cx, ctQP) {
+			buffQ := poolQP.GetBuffPoly()
+			defer poolQP.RecycleBuffPoly(buffQ)
+			buffQ.CopyLvl(levelQ, cx)
+			cxInvNTT = *buffQ
+		}
 	}
 
 	pw2 := gadgetCt.BaseTwoDecomposition
@@ -234,7 +277,7 @@ func (eval Evaluator) gadgetProductSinglePAndBitDecompLazy(levelQ int, cx ring.P
 
 	buffBitDecomp := eval.pool.GetBuffUintArray()
 	defer eval.pool.RecycleBuffUintArray(buffBitDecomp)
-	cwNTT := *buffBitDecomp
+	cwNTTBuff := *buffBitDecomp
 
 	QiOverF := eval.params.QiOverflowMargin(levelQ) >> 1
 	PiOverF := eval.params.PiOverflowMargin(levelP) >> 1
@@ -242,6 +285,11 @@ func (eval Evaluator) gadgetProductSinglePAndBitDecompLazy(levelQ int, cx ring.P
 	el := gadgetCt.Value
 
 	c2QP := buff
+
+	// For the i-th RNS decomposition with no base-2 split, the residue modulo
+	// qi is the input itself. If it is already in the NTT domain and does not
+	// alias the output, reuse that limb instead of recomputing one NTT per qi.
+	reuseCXNTT := mask == 0 && ctQP.IsNTT && !gadgetProductInputAliasesOutput(levelQ, cx, ctQP)
 
 	// Re-encryption with CRT decomposition for the Qi
 	var reduce int
@@ -264,10 +312,15 @@ func (eval Evaluator) gadgetProductSinglePAndBitDecompLazy(levelQ int, cx ring.P
 			if i == 0 && j == 0 {
 
 				for u, s := range ringQ.SubRings[:levelQ+1] {
+					cwNTT := cwNTTBuff
 					if mask == 0 {
-						s.NTTLazy(c2QP.Q.Coeffs[u], cwNTT)
+						if reuseCXNTT && u == i {
+							cwNTT = cx.Coeffs[u]
+						} else {
+							s.NTTLazy(c2QP.Q.Coeffs[u], cwNTTBuff)
+						}
 					} else {
-						s.NTTLazy(cw, cwNTT)
+						s.NTTLazy(cw, cwNTTBuff)
 					}
 					s.MulCoeffsMontgomeryLazy(el[i][j][0].Q.Coeffs[u], cwNTT, ctQP.Value[0].Q.Coeffs[u])
 					s.MulCoeffsMontgomeryLazy(el[i][j][1].Q.Coeffs[u], cwNTT, ctQP.Value[1].Q.Coeffs[u])
@@ -276,21 +329,26 @@ func (eval Evaluator) gadgetProductSinglePAndBitDecompLazy(levelQ int, cx ring.P
 				if ringP != nil {
 					for u, s := range ringP.SubRings[:levelP+1] {
 						if mask == 0 {
-							s.NTTLazy(c2QP.P.Coeffs[u], cwNTT)
+							s.NTTLazy(c2QP.P.Coeffs[u], cwNTTBuff)
 						} else {
-							s.NTTLazy(cw, cwNTT)
+							s.NTTLazy(cw, cwNTTBuff)
 						}
-						s.MulCoeffsMontgomeryLazy(el[i][j][0].P.Coeffs[u], cwNTT, ctQP.Value[0].P.Coeffs[u])
-						s.MulCoeffsMontgomeryLazy(el[i][j][1].P.Coeffs[u], cwNTT, ctQP.Value[1].P.Coeffs[u])
+						s.MulCoeffsMontgomeryLazy(el[i][j][0].P.Coeffs[u], cwNTTBuff, ctQP.Value[0].P.Coeffs[u])
+						s.MulCoeffsMontgomeryLazy(el[i][j][1].P.Coeffs[u], cwNTTBuff, ctQP.Value[1].P.Coeffs[u])
 					}
 				}
 
 			} else {
 				for u, s := range ringQ.SubRings[:levelQ+1] {
+					cwNTT := cwNTTBuff
 					if mask == 0 {
-						s.NTTLazy(c2QP.Q.Coeffs[u], cwNTT)
+						if reuseCXNTT && u == i {
+							cwNTT = cx.Coeffs[u]
+						} else {
+							s.NTTLazy(c2QP.Q.Coeffs[u], cwNTTBuff)
+						}
 					} else {
-						s.NTTLazy(cw, cwNTT)
+						s.NTTLazy(cw, cwNTTBuff)
 					}
 					s.MulCoeffsMontgomeryLazyThenAddLazy(el[i][j][0].Q.Coeffs[u], cwNTT, ctQP.Value[0].Q.Coeffs[u])
 					s.MulCoeffsMontgomeryLazyThenAddLazy(el[i][j][1].Q.Coeffs[u], cwNTT, ctQP.Value[1].Q.Coeffs[u])
@@ -299,12 +357,12 @@ func (eval Evaluator) gadgetProductSinglePAndBitDecompLazy(levelQ int, cx ring.P
 				if ringP != nil {
 					for u, s := range ringP.SubRings[:levelP+1] {
 						if mask == 0 {
-							s.NTTLazy(c2QP.P.Coeffs[u], cwNTT)
+							s.NTTLazy(c2QP.P.Coeffs[u], cwNTTBuff)
 						} else {
-							s.NTTLazy(cw, cwNTT)
+							s.NTTLazy(cw, cwNTTBuff)
 						}
-						s.MulCoeffsMontgomeryLazyThenAddLazy(el[i][j][0].P.Coeffs[u], cwNTT, ctQP.Value[0].P.Coeffs[u])
-						s.MulCoeffsMontgomeryLazyThenAddLazy(el[i][j][1].P.Coeffs[u], cwNTT, ctQP.Value[1].P.Coeffs[u])
+						s.MulCoeffsMontgomeryLazyThenAddLazy(el[i][j][0].P.Coeffs[u], cwNTTBuff, ctQP.Value[0].P.Coeffs[u])
+						s.MulCoeffsMontgomeryLazyThenAddLazy(el[i][j][1].P.Coeffs[u], cwNTTBuff, ctQP.Value[1].P.Coeffs[u])
 					}
 				}
 			}

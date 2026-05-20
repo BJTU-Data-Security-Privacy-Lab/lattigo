@@ -174,6 +174,31 @@ func TestRLWE(t *testing.T) {
 	testUserDefinedParameters(t)
 }
 
+func TestGadgetProductSinglePNoBaseTwoDecomposition(t *testing.T) {
+
+	for _, NTTFlag := range []bool{true, false}[:] {
+		for _, RingType := range []ring.Type{ring.Standard, ring.ConjugateInvariant}[:] {
+
+			params, err := NewParametersFromLiteral(ParametersLiteral{
+				LogN:     logN,
+				Q:        qi,
+				P:        pj[:1],
+				NTTFlag:  NTTFlag,
+				RingType: RingType,
+			})
+			require.NoError(t, err)
+
+			tc, err := NewTestContext(params)
+			require.NoError(t, err)
+
+			for _, level := range []int{0, params.MaxLevel()}[:] {
+				testGadgetProduct(tc, level, 0, t)
+				testGadgetProductInputOutputAlias(tc, level, t)
+			}
+		}
+	}
+}
+
 type TestContext struct {
 	params Parameters
 	kgen   *KeyGenerator
@@ -776,6 +801,49 @@ func testGadgetProduct(tc *TestContext, levelQ, bpw2 int, t *testing.T) {
 			require.GreaterOrEqual(t, NoiseBound, ringQ.Log2OfStandardDeviation(pt.Value))
 		})
 	}
+}
+
+func testGadgetProductInputOutputAlias(tc *TestContext, levelQ int, t *testing.T) {
+
+	params := tc.params
+	sk := tc.sk
+	kgen := tc.kgen
+	eval := tc.eval
+
+	ringQ := params.RingQ().AtLevel(levelQ)
+
+	prng, _ := sampling.NewKeyedPRNG([]byte{'a', 'l', 'i', 'a', 's'})
+	sampler := ring.NewUniformSampler(prng, ringQ)
+
+	t.Run(testString(params, levelQ, 0, 0, "Evaluator/GadgetProduct/InputOutputAlias"), func(t *testing.T) {
+
+		skOut := kgen.GenSecretKeyNew()
+
+		ct := NewCiphertext(params, 1, levelQ)
+		sampler.Read(ct.Value[1])
+		a := *ct.Value[1].CopyNew()
+
+		evk := NewEvaluationKey(params, EvaluationKeyParameters{
+			LevelQ:               utils.Pointy(levelQ),
+			LevelP:               utils.Pointy(0),
+			BaseTwoDecomposition: utils.Pointy(0),
+		})
+
+		kgen.GenEvaluationKey(sk, skOut, evk)
+		eval.GadgetProduct(levelQ, ct.Value[1], &evk.GadgetCiphertext, ct)
+
+		pt := NewDecryptor(params, skOut).DecryptNew(ct)
+
+		if !pt.IsNTT {
+			ringQ.NTT(pt.Value, pt.Value)
+			ringQ.NTT(a, a)
+		}
+
+		ringQ.MulCoeffsMontgomeryThenSub(a, sk.Value.Q, pt.Value)
+		ringQ.INTT(pt.Value, pt.Value)
+
+		require.GreaterOrEqual(t, float64(params.LogN()), ringQ.Log2OfStandardDeviation(pt.Value))
+	})
 }
 
 func testApplyEvaluationKey(tc *TestContext, level, bpw2 int, t *testing.T) {
