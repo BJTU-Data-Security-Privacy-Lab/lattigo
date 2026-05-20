@@ -29,6 +29,7 @@ func BenchmarkRing(b *testing.B) {
 		benchNegCoeffs(tc, b)
 		benchMulScalar(tc, b)
 		benchExtendBasis(tc, b)
+		benchDecomposeAndSplit(tc, b)
 		benchDivByLastModulus(tc, b)
 		benchMRed(tc, b)
 		benchBRed(tc, b)
@@ -272,6 +273,31 @@ func benchExtendBasis(tc *testParams, b *testing.B) {
 	b.Run(fmt.Sprintf("ExtendBasis/ModDownNTT/N=%d/limbsQ=%d/limbsP=%d", tc.ringQ.N(), tc.ringQ.ModuliChainLength(), tc.ringP.ModuliChainLength()), func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
 			basisExtender.ModDownQPtoQNTT(levelQ, levelP, p0, p1, p0)
+		}
+	})
+}
+
+func benchDecomposeAndSplit(tc *testParams, b *testing.B) {
+
+	decomposer := NewDecomposer(tc.ringQ, tc.ringP)
+
+	p0 := tc.uniformSamplerQ.ReadNew()
+
+	levelQ := tc.ringQ.MaxLevel()
+
+	b.Run(fmt.Sprintf("DecomposeAndSplit/Simple/N=%d/limbsQ=%d/limbsP=%d/nbPi=1", tc.ringQ.N(), tc.ringQ.ModuliChainLength(), tc.ringP.ModuliChainLength()), func(b *testing.B) {
+		p1Q := tc.ringQ.NewPoly()
+		p1P := tc.ringP.AtLevel(0).NewPoly()
+		for i := 0; i < b.N; i++ {
+			decomposer.DecomposeAndSplit(levelQ, 0, 1, 0, p0, p1Q, p1P)
+		}
+	})
+
+	b.Run(fmt.Sprintf("DecomposeAndSplit/Reconstruct/N=%d/limbsQ=%d/limbsP=%d/nbPi=2", tc.ringQ.N(), tc.ringQ.ModuliChainLength(), tc.ringP.ModuliChainLength()), func(b *testing.B) {
+		p1Q := tc.ringQ.NewPoly()
+		p1P := tc.ringP.AtLevel(1).NewPoly()
+		for i := 0; i < b.N; i++ {
+			decomposer.DecomposeAndSplit(levelQ, 1, 2, 0, p0, p1Q, p1P)
 		}
 	})
 }

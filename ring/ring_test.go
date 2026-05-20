@@ -77,6 +77,7 @@ func TestRing(t *testing.T) {
 		testMForm(tc, t)
 		testMulScalarBigint(tc, t)
 		testExtendBasis(tc, t)
+		testDecomposeAndSplit(tc, t)
 		testMultByMonomial(tc, t)
 
 	}

@@ -387,8 +387,6 @@ func (decomposer *Decomposer) DecomposeAndSplit(levelQ, levelP, nbPi, BaseRNSDec
 		ringP = decomposer.ringP.AtLevel(levelP)
 	}
 
-	N := ringQ.N()
-
 	lvlQStart := BaseRNSDecompositionVectorSize * nbPi
 
 	var decompLvl int
@@ -401,42 +399,12 @@ func (decomposer *Decomposer) DecomposeAndSplit(levelQ, levelP, nbPi, BaseRNSDec
 	// First we check if the vector can simply by coping and rearranging elements (the case where no reconstruction is needed)
 	if decompLvl < 0 {
 
-		var pos, neg, coeff, tmp uint64
-
-		Q := ringQ.ModuliChain()
-		BRCQ := ringQ.BRedConstants()
-
-		var P []uint64
-		var BRCP [][2]uint64
-
-		if ringP != nil {
-			P = ringP.ModuliChain()
-			BRCP = ringP.BRedConstants()
-		}
-
-		for j := 0; j < N; j++ {
-
-			coeff = p0Q.Coeffs[lvlQStart][j]
-			pos, neg = 1, 0
-			if coeff >= (Q[lvlQStart] >> 1) {
-				coeff = Q[lvlQStart] - coeff
-				pos, neg = 0, 1
-			}
-
-			for i := 0; i < levelQ+1; i++ {
-				tmp = BRedAdd(coeff, Q[i], BRCQ[i])
-				p1Q.Coeffs[i][j] = tmp*pos + (Q[i]-tmp)*neg
-
-			}
-
-			for i := 0; i < levelP+1; i++ {
-				tmp = BRedAdd(coeff, P[i], BRCP[i])
-				p1P.Coeffs[i][j] = tmp*pos + (P[i]-tmp)*neg
-			}
-		}
+		decomposeAndSplitSimple(levelQ, levelP, lvlQStart, p0Q, p1Q, p1P, ringQ, ringP)
 
 		// Otherwise, we apply a fast exact base conversion for the reconstruction
 	} else {
+
+		N := ringQ.N()
 
 		p0idxst := BaseRNSDecompositionVectorSize * nbPi
 		p0idxed := p0idxst + nbPi
@@ -498,6 +466,43 @@ func (decomposer *Decomposer) DecomposeAndSplit(levelQ, levelP, nbPi, BaseRNSDec
 
 		ringQ.SubScalarBigint(p1Q, QHalf, p1Q)
 		ringP.SubScalarBigint(p1P, QHalf, p1P)
+	}
+}
+
+func decomposeAndSplitSimple(levelQ, levelP, lvlQStart int, p0Q, p1Q, p1P Poly, ringQ, ringP *Ring) {
+
+	Q := ringQ.ModuliChain()
+	BRCQ := ringQ.BRedConstants()
+	coeffs := p0Q.Coeffs[lvlQStart]
+	sourceModulus := Q[lvlQStart]
+	sourceHalf := sourceModulus >> 1
+
+	for i := 0; i < levelQ+1; i++ {
+		decomposeAndSplitSimpleLimb(coeffs, sourceModulus, sourceHalf, Q[i], BRCQ[i], p1Q.Coeffs[i])
+	}
+
+	if ringP != nil {
+		P := ringP.ModuliChain()
+		BRCP := ringP.BRedConstants()
+
+		for i := 0; i < levelP+1; i++ {
+			decomposeAndSplitSimpleLimb(coeffs, sourceModulus, sourceHalf, P[i], BRCP[i], p1P.Coeffs[i])
+		}
+	}
+}
+
+func decomposeAndSplitSimpleLimb(coeffs []uint64, sourceModulus, sourceHalf, targetModulus uint64, bredConstant [2]uint64, out []uint64) {
+
+	for j, coeff := range coeffs {
+
+		pos, neg := uint64(1), uint64(0)
+		if coeff >= sourceHalf {
+			coeff = sourceModulus - coeff
+			pos, neg = 0, 1
+		}
+
+		tmp := BRedAdd(coeff, targetModulus, bredConstant)
+		out[j] = tmp*pos + (targetModulus-tmp)*neg
 	}
 }
 
