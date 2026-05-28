@@ -1,134 +1,75 @@
 # A0 FullKeyPerTargetLevel Baseline Plan
 
-统一测试环境、测试用例、Go 工具链命令和固定参数见：[a0_a6_test_standard.md](a0_a6_test_standard.md)。
-Go 工具链固定使用方式见：[toolchain_usage.md](toolchain_usage.md)。
+统一测试环境、测试用例、Go 工具链命令和固定参数见
+[a0_a6_test_standard.md](a0_a6_test_standard.md)。Go 工具链固定使用方式见
+[toolchain_usage.md](toolchain_usage.md)。
 
 ## 1. Purpose and non-goals
 
-A0 is the exact baseline for the multi-target-level bootstrapping key reuse work.
-It generates a complete and independent bootstrapping key package for every
-configured target level in `AllTargetLevels`.
+A0 是 multi-target-level bootstrapping key reuse 工作的唯一 baseline。它必须对
+`AllTargetLevels` 中每一个 target level `r` 独立生成完整 `BK(r)`，并记录后续
+A1-A6 可直接消费的 correctness、precision、runtime、storage 和 material identity
+明细。
 
-The purpose of A0 is to provide the correctness, precision, storage, keygen RAM,
-runtime RAM, and latency reference that A1-A6 must compare against.
+A0 不追求节省 keygen、storage 或 RAM。A0 禁止：
 
-A0 is intentionally not optimized. It must not perform:
+- rotation key interning；
+- linear-transform schedule interning；
+- encoded diagonal sharing；
+- RNS prefix / superset view；
+- high-level bootstrap 后 `DropLevel` 替代 direct `BK(r)`；
+- runtime lazy key generation。
 
-- rotation key interning;
-- linear-transform schedule interning;
-- encoded diagonal sharing;
-- RNS prefix or superset views;
-- bootstrapping to a higher level followed by `DropLevel`;
-- runtime lazy key generation.
-
-A0 may record canonical IDs for reporting and later comparison, but those IDs
-must not be used to share or reuse material inside A0.
+A0 可以记录 canonical IDs，但这些 ID 只用于报告和后续 A1-A6 对照，不能用于 A0
+内部共享决策。
 
 ## 2. A0 generation logic
 
-A0 uses `AllTargetLevels`, not `UsedTargetLevels`.
+A0 使用 `AllTargetLevels`，不是 `UsedTargetLevels`。A1 之后的 demand-driven lane
+才允许只生成 `UsedTargetLevels`。
 
 ```text
 for r in AllTargetLevels:
-    build target-specific bootstrapping configuration for r
-    reject before keygen if OutputLevel() cannot be made equal to r
-    generate a complete independent BK(r)
-    construct an independent native evaluator for BK(r)
-    run bootstrap correctness and metric collection for r
+    build target-specific residual Q-prefix parameters for r
+    build target-specific native bootstrapping parameters/evaluator
+    reject before keygen if OutputLevel() cannot equal r
+    independently generate complete bootstrapping.EvaluationKeys
+    independently construct CoeffsToSlots / SlotsToCoeffs encoded matrices
+    run bootstrap with direct BK(r)
+    assert OutputLevel()==r, ctOut.Level()==r, ctOut.Scale==FixedTargetScale
 ```
 
-For each `r`, A0 must independently generate or construct:
-
-- `bootstrapping.EvaluationKeys`;
-- all ring-switch and dense/sparse switch keys required by the native
-  bootstrapping parameters;
-- the relinearization key;
-- all Galois keys required by `btpParams.GaloisElements(...)`;
-- CoeffsToSlots and SlotsToCoeffs encoded matrices;
-- the native evaluator used to execute bootstrapping for that target.
-
-The A0 harness must assert the target-level contract before accepting a run:
+当前 Lattigo public API 不支持 `Bootstrap(ct, targetLevel)`。`Evaluator.OutputLevel()`
+由 `ResidualParameters.MaxLevel()` 决定。因此 A0 的非侵入式原生实现规则是：
 
 ```text
-evaluator.OutputLevel() == r
-ctOut.Level() == r
-ctOut.Scale == FixedTargetScale
+canonical full chain: Q[0], Q[1], ..., Q[L]
+target level r: construct residual parameters with Q[:r+1]
 ```
 
-If a target-specific native evaluator cannot satisfy `OutputLevel() == r`, A0
-must fail the case before recording correctness or performance metrics. This
-prevents later A1-A6 experiments from comparing against an invalid baseline.
+这表示所有 target 都来自同一个 canonical full CKKS profile 和同一条 full modulus
+chain，但每个 target-specific native evaluator 使用该 full chain 的 Q-prefix view。
 
-## 3. Common experiment data contract for A0-A6
+## 3. Common experiment contract
 
-All A0-A6 experiments must use the same case description and result schema so
-that each ablation can be compared against A0 without interpretation changes.
+所有 A0-A6 实验必须固定：
 
-### ExperimentCase
+- 同一个 canonical full CKKS profile；
+- 同一个 secret-key domain；
+- 同一条 canonical full Q/P modulus chain；
+- 同一个 fixed target scale；
+- 同一个 plaintext / ciphertext input seed；
+- 同一个 `AllTargetLevels` 和对应 `UsedTargetLevels` 定义。
 
-```text
-ExperimentCase {
-  case_id
-  params_profile
-  all_target_levels
-  used_target_levels
-  fixed_target_scale
-  log_slots
-  ring_switch_mode
-  packed_mode
-  seed
-  repeat_count
-}
-```
+每个 case 至少记录：
 
-Rules:
+- `ExperimentCase`：profile、target sets、scale、logSlots、ring-switch mode、packed mode、seed、repeat count；
+- `TargetRunResult`：target level、output level、scale equality、real/imag precision、bootstrap status；
+- `MaterialMetrics`：generated key/rotation/diagonal counts、persistent bytes、A0 sharing defaults；
+- `RuntimeMetrics`：keygen time、evaluator/matrix construction time、bootstrap latency、peak heaps；
+- baseline material identity：parameter chain、Galois set、linear transform schedule、encoded diagonal IDs。
 
-- `all_target_levels` is the A0 input set.
-- `used_target_levels` is only used by A1 and later demand-driven variants.
-- `fixed_target_scale` must be identical for A0-A6 in the same case.
-- `seed` must drive plaintext generation and encryption randomness whenever the
-  test harness exposes deterministic sampling.
-
-### TargetRunResult
-
-```text
-TargetRunResult {
-  case_id
-  target_level
-  output_level
-  output_scale_equal_fixed_target_scale
-  avg_log2_precision_real
-  avg_log2_precision_imag
-  bootstrap_error_status
-}
-```
-
-Rules:
-
-- `output_level` must equal `target_level`.
-- `output_scale_equal_fixed_target_scale` must be true.
-- Precision should follow the existing Lattigo bootstrapping test style using
-  `ckks.GetPrecisionStats`.
-
-### MaterialMetrics
-
-```text
-MaterialMetrics {
-  case_id
-  target_level
-  generated_evaluation_key_count
-  generated_rotation_key_count
-  generated_encoded_diagonal_count
-  persistent_key_bytes
-  persistent_matrix_bytes
-  shared_rotation_keys
-  shared_encoded_diagonals
-  rns_slice_success
-  fallback_reason
-}
-```
-
-A0 defaults:
+A0 metric defaults 固定为：
 
 ```text
 shared_rotation_keys = 0
@@ -137,237 +78,170 @@ rns_slice_success = not_applicable
 fallback_reason = none
 ```
 
-Rules:
+## 4. CSV-only output contract
 
-- `persistent_key_bytes` should use native `BinarySize` when available.
-- If encoded matrices do not expose native binary size, estimate matrix bytes as
-  `number_of_QP_limbs * ring_degree * 8` per stored polynomial and report that
-  the value is estimated.
-- Galois key count must be counted after native key generation, but without
-  dedup across target levels.
-
-### RuntimeMetrics
-
-```text
-RuntimeMetrics {
-  case_id
-  target_level
-  keygen_time
-  evaluator_and_matrix_construction_time
-  bootstrap_latency
-  peak_keygen_heap
-  peak_runtime_heap
-}
-```
-
-Rules:
-
-- key generation time and evaluator/matrix construction time must be measured
-  separately.
-- bootstrap latency must be measured after the evaluator is constructed.
-- peak heap measurements must separate keygen phase and runtime phase.
-
-## 4. Complete A0 correctness and performance test plan
-
-### Correctness coverage
-
-A0 must include these scenarios:
-
-- single target level;
-- multiple target levels with clustered, sparse, and random distributions;
-- bootstrapping without ring-degree switch;
-- bootstrapping with ring-degree switch;
-- conjugate-invariant to standard ring switch, if the target profile uses it;
-- standard to conjugate-invariant ring switch, if the target profile uses it;
-- packed bootstrapping through `BootstrapMany`;
-- invalid target level rejected before keygen;
-- forced output-level mismatch fails the test;
-- forced output-scale mismatch fails the test.
-
-Each correctness case must:
-
-- generate random CKKS plaintext vectors;
-- encrypt at a valid input level for the native bootstrapper;
-- run A0 `BK(r)`;
-- assert `ctOut.Level() == r`;
-- assert `ctOut.Scale == FixedTargetScale`;
-- decrypt and compare precision against the case threshold.
-
-### Precision checks
-
-Precision checks must follow the existing bootstrapping test pattern:
-
-```text
-precStats = ckks.GetPrecisionStats(...)
-avgReal = precStats.AVGLog2Prec.Real
-avgImag = precStats.AVGLog2Prec.Imag
-```
-
-Each target level must record `avgReal` and `avgImag`. The minimum threshold
-should match the native bootstrapping test policy for the chosen parameter
-profile unless the experiment case explicitly defines a stricter threshold.
-
-### Metric checks
-
-For every `r`, A0 must record:
-
-- keygen time;
-- evaluator and matrix construction time;
-- bootstrap latency;
-- peak keygen heap;
-- peak runtime heap;
-- key binary size;
-- encoded matrix byte estimate or native size;
-- generated evaluation-key count;
-- generated rotation-key count;
-- generated encoded diagonal count.
-
-The test harness must report metrics even when a correctness assertion fails,
-as long as the failure happens after target-specific keygen has completed. A
-case rejected before keygen must record only the rejection reason.
-
-## 5. A0 test code placement and naming
-
-A0 implementation must follow the global test-code layout in
-[a0_a6_test_standard.md](a0_a6_test_standard.md). The A0-specific test code must
-live in the native bootstrapping package:
-
-```text
-circuits/ckks/bootstrapping/
-```
-
-The A0 test file must be:
-
-```text
-bootstrap_key_reuse_a0_test.go
-```
-
-Shared helpers used by A0 and later A1-A6 lanes must live in:
-
-```text
-bootstrap_key_reuse_common_test.go
-bootstrap_key_reuse_metrics_test.go
-```
-
-A0 test functions must use:
-
-```text
-TestBootstrapKeyReuseA0_<CaseName>
-```
-
-A0 benchmark functions must use:
-
-```text
-BenchmarkBootstrapKeyReuseA0_<CaseName>
-```
-
-`<CaseName>` must be derived from the fixed parameter profile and target-set
-name in the unified test standard, for example:
-
-```text
-P0TinyNativeSingle
-P2MultiFastClustered
-P4N15DenseSparse
-P5N16SparseLongRandom
-```
-
-A0 helper names must be unexported and must not introduce public API. Preferred
-helper names are:
-
-```text
-buildBootstrapKeyReuseCase
-runBootstrapKeyReuseA0
-collectBootstrapKeyReuseMetrics
-writeBootstrapKeyReuseResult
-```
-
-## 6. A0 output location and file format
-
-A0 output must follow the global output contract in
-[a0_a6_test_standard.md](a0_a6_test_standard.md). Each A0 run must write to:
+A0 持久化输出必须是 CSV-only。run directory 中不允许生成或保留 `.json`、`.jsonl`
+或 `.log` 审计文件。标准 run directory 为：
 
 ```text
 docs/bootstrap_key_reuse/results/<YYYYMMDD-HHMMSS>_a0_<case_id>/
 ```
 
-Example:
+每个 A0 run directory 必须只包含下列 CSV 文件：
 
 ```text
-docs/bootstrap_key_reuse/results/20260528-153000_a0_P2_MULTI_FAST_clustered/
+metadata.csv
+experiment_case.csv
+target_results.csv
+material_metrics.csv
+runtime_metrics.csv
+parameter_chain_baseline.csv
+galois_key_baseline.csv
+linear_transform_schedule_baseline.csv
+encoded_diagonal_baseline.csv
+material_baseline_index.csv
+failures.csv
+summary.csv
 ```
 
-Each A0 run directory must contain:
+数组字段使用人类可读字符串编码：
 
 ```text
-metadata.json
-go-test.jsonl
-results.jsonl
-summary.json
-metrics.csv
-stdout.log
-stderr.log
+integer list: 1;2;3
+hash list: sha256:a;sha256:b
+key-value list: key1=value1;key2=value2
 ```
 
-A0-specific output rules:
+CSV header、文件名和字段顺序由统一测试标准固定。A0 harness 必须拒绝包含
+`.json`、`.jsonl` 或 `.log` 的 result directory，避免旧审计产物混入新结果。
 
-- `metadata.json` must record `lane = "a0"`, the exact Go command, Go env,
-  git branch, git commit, dirty state, fixed parameter profile, and
-  `AllTargetLevels`.
-- `results.jsonl` must include one `ExperimentCase` record per case and one
-  `TargetRunResult`, `MaterialMetrics`, and `RuntimeMetrics` record per target
-  level.
-- `summary.json` must set `lane = "a0"` and must report all target levels in
-  `AllTargetLevels`, including failed target levels.
-- `metrics.csv` must use the fixed header defined in the unified test standard.
-- `stdout.log` and `stderr.log` must preserve raw command output.
+## 5. Baseline material identity
 
-A0 default metric values are fixed:
+### GaloisKeyBaseline
 
-```text
-shared_rotation_keys = 0
-shared_encoded_diagonals = 0
-rns_slice_success = not_applicable
-fallback_reason = none
-```
+每个 target level 一行，记录：
 
-If A0 rejects a target before keygen because `OutputLevel() != r`, it must still
-write a `Failure` record to `results.jsonl` and mark the run `status = "fail"`
-in `summary.json`.
+- generated Galois elements；
+- required bootstrapping Galois elements；
+- canonical rotation IDs，格式为 `gal:<uint64>`；
+- `discrete_log_k`，仅用于分析；
+- complex conjugation key 是否存在；
+- rotation set hash。
 
-## 7. A0 required commands
+canonical rotation ID 使用 Lattigo 实际 `gal_el`，不是用户 rotation `k`。
 
-Before running A0 tests, the local Go toolchain must be activated:
+### LinearTransformScheduleBaseline
+
+每个 CoeffsToSlots / SlotsToCoeffs transform 一行，记录：
+
+- matrix name：`coeffs_to_slots` 或 `slots_to_coeffs`；
+- DFT literal：type、format、logSlots、levelQ、levelP、levels、bitReversed、logBSGSRatio；
+- linear transformation：transform index、levelQ、levelP、N1、log dimensions、scale；
+- diagonal indices；
+- required Galois elements；
+- transform schedule ID；
+- matrix schedule ID。
+
+A3 只能在 schedule ID 相等时做 schedule interning。A3 不共享 encoded diagonal。
+
+### EncodedDiagonalBaseline
+
+每个 encoded diagonal 一行，记录：
+
+- matrix name；
+- transform index；
+- diagonal index；
+- levelQ / levelP / N；
+- Q prefix hash；
+- P prefix hash；
+- poly binary size；
+- poly SHA256；
+- encoded diagonal ID。
+
+A4 只能用 `encoded_diagonal_id` 判定 exact-compatible encoded diagonal sharing。A4
+不允许 RNS prefix slicing。
+
+### MaterialBaselineIndex
+
+每个 target level 一行，汇总：
+
+- rotation set hash；
+- C2S schedule hash；
+- S2C schedule hash；
+- encoded diagonal set hash；
+- rotation / schedule / encoded diagonal counts；
+- 与 `material_metrics.csv` 的 count 一致性字段。
+
+## 6. Correctness and performance test plan
+
+A0 必测场景：
+
+- single target level；
+- multiple target levels：clustered、sparse、random；
+- no ring-degree switch；
+- ring-degree switch；
+- conjugate-invariant / standard ring switch，如果目标 profile 使用；
+- packed bootstrapping / `BootstrapMany`；
+- invalid target level rejects before keygen；
+- output level mismatch fails；
+- output scale mismatch fails。
+
+每个 correctness case 必须：
+
+- 生成 CKKS plaintext vector；
+- 加密到 native bootstrapper 可接受的 input level；
+- 使用 direct `BK(r)` bootstrapping；
+- 断言 `ctOut.Level()==r`；
+- 断言 `ctOut.Scale==FixedTargetScale`；
+- 使用 `ckks.GetPrecisionStats` 记录 real/imag average log2 precision；
+- 与 case precision threshold 比较。
+
+每个 target level 必须记录：
+
+- keygen time；
+- evaluator/matrix construction time；
+- bootstrap latency；
+- peak keygen heap；
+- peak runtime heap；
+- key binary size；
+- matrix binary size；
+- generated evaluation-key count；
+- generated rotation-key count；
+- generated encoded diagonal count。
+
+keygen 后发生 correctness failure 时仍要写 metrics 和 baseline 明细。keygen 前拒绝的
+case 只写 failure 和 summary。
+
+## 7. Required commands
+
+激活 repo-local Go toolchain：
 
 ```powershell
 . .\.toolchain\use-go.ps1
 ```
 
-The minimum native regression command that must pass before A0-specific tests is:
+native quick regression：
 
 ```powershell
 go test ./circuits/ckks/bootstrapping -run '^TestBootstrapping$' -count=1 -timeout=30m -args -print-precision
 ```
 
-Once `bootstrap_key_reuse_a0_test.go` exists, the A0-specific quick command must
-be:
+A0 单 case 标准命令：
 
 ```powershell
 $runDir = "docs/bootstrap_key_reuse/results/<YYYYMMDD-HHMMSS>_a0_<case_id>"
 New-Item -ItemType Directory -Force -Path $runDir | Out-Null
 
-go test -json ./circuits/ckks/bootstrapping `
+go test ./circuits/ckks/bootstrapping `
   -run '^TestBootstrapKeyReuseA0_<CaseName>$' `
   -count=1 `
   -timeout=30m `
-  -args -print-precision '-bkr.result-dir' $runDir `
-  2> "$runDir\stderr.log" |
-  Tee-Object -FilePath "$runDir\go-test.jsonl" |
-  Tee-Object -FilePath "$runDir\stdout.log"
+  -args -print-precision '-bkr.result-dir' $runDir
 
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 ```
 
-A0 benchmark commands must use Go's native benchmark toolchain:
+A0 benchmark 标准命令：
 
 ```powershell
 $runDir = "docs/bootstrap_key_reuse/results/<YYYYMMDD-HHMMSS>_a0_bench_<case_id>"
@@ -382,33 +256,22 @@ go test ./circuits/ckks/bootstrapping `
   -args '-bkr.result-dir' $runDir
 ```
 
-## 8. How A1-A6 consume A0 baseline results
+标准命令不使用 `go test -json`，不重定向 stdout/stderr，不使用 `Tee-Object`。
 
-A0 produces the reference data used by all later ablations.
+## 8. How A1-A6 consume A0 baseline
 
-- A1 compares only target levels in `UsedTargetLevels` against A0 and must prove
-  that unused levels in `AllTargetLevels - UsedTargetLevels` are not generated.
-- A2 uses A0 per-target Galois element sets to compute union size, overlap
-  ratio, and rotation-key savings.
-- A3 uses A0 per-target linear-transform schedules to compute schedule equality
-  and schedule reuse opportunities.
-- A4 uses A0 encoded diagonal hashes and metadata to decide exact-compatible
-  encoded diagonal sharing.
-- A5 uses A0 exact runs as the correctness reference for evaluation-key prefix
-  views and encoded diagonal RNS prefix views.
-- A6 uses A0 direct `BK(r)` outputs as the reference for any high-level
-  bootstrap followed by `DropLevel` strategy.
+- A1：只在 `UsedTargetLevels` 上与 A0 对比，并证明 unused target levels 无 keygen。
+- A2：读取 `galois_key_baseline.csv` 计算 union、overlap、rotation-key saving。
+- A3：读取 `linear_transform_schedule_baseline.csv` 判断 schedule equality。
+- A4：读取 `encoded_diagonal_baseline.csv` 和 `material_baseline_index.csv` 判断 exact-compatible sharing。
+- A5：以 A0 exact direct run 作为 prefix/superset view 正确性参照。
+- A6：以 A0 direct `BK(r)` 作为 high-level bootstrap + `DropLevel` 的参照。
 
-The acceptance rule for A1-A6 is simple: an optimized run may reduce generated
-material, storage, or RAM, but it must preserve the A0 target-level contract and
-must not reduce precision beyond the experiment threshold.
+任一 A1-A6 优化都必须保持 A0 的 target level、fixed scale 和 precision 语义。
 
 ## 9. Assumptions
 
-- A0 is a correctness and performance baseline, not an optimization.
-- A0 uses the same CKKS parameters, secret-key domain, modulus chain, and fixed
-  target scale as A1-A6 in the same experiment case.
-- The target-specific evaluator must expose `OutputLevel() == r`; otherwise the
-  case is invalid for A0.
-- A0 stores no shared native pointers between target levels, even when two
-  independently generated materials have the same canonical ID.
+- A0 是 correctness/performance/material identity baseline。
+- A0 当前使用 Lattigo 原生 Q-prefix residual parameters 实现不同 target output level。
+- A0 不改生产代码，不新增 public API。
+- A0 不在 target levels 之间共享 native key、schedule 或 encoded diagonal pointer。

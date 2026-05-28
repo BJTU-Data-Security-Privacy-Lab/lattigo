@@ -1,9 +1,14 @@
 package bootstrapping
 
 import (
+	"encoding/csv"
 	"errors"
 	"fmt"
 	"math"
+	"os"
+	"path/filepath"
+	"reflect"
+	"strconv"
 	"testing"
 	"time"
 
@@ -109,7 +114,16 @@ func bkrRunA0Target(t *testing.T, rec *bkrRecorder, spec bkrCaseSpec, targetLeve
 		return err
 	}
 
-	material := collectBootstrapKeyReuseMetrics(spec, targetLevel, keys, eval)
+	baseline, err := collectBootstrapKeyReuseBaselineDetails(spec, targetLevel, btpParams, keys, eval)
+	if err != nil {
+		runtimePeak := runtimeSampler.stopAndMax()
+		_ = runtimePeak
+		_ = rec.writeFailure(targetLevel, "baseline_details", err.Error(), false, true, false)
+		return err
+	}
+
+	material := collectBootstrapKeyReuseMetrics(spec, targetLevel, keys, eval, baseline)
+	completeBootstrapKeyReuseBaselineIndex(&baseline, material)
 
 	bootstrapStart := time.Now()
 	outputs, wants, bootstrapErr := bkrBootstrapA0Ciphertexts(spec, residualParams, eval, sk, targetLevel)
@@ -132,7 +146,7 @@ func bkrRunA0Target(t *testing.T, rec *bkrRecorder, spec bkrCaseSpec, targetLeve
 
 	if bootstrapErr != nil {
 		result := bkrEmptyTargetRunResult(spec, targetLevel, expectedOutputLevel, residualParams, bootstrapErr.Error())
-		if err := writeBootstrapKeyReuseResult(rec, result, material, runtimeMetrics); err != nil {
+		if err := writeBootstrapKeyReuseResult(rec, result, material, runtimeMetrics, baseline); err != nil {
 			return err
 		}
 		_ = rec.writeFailure(targetLevel, "bootstrap", bootstrapErr.Error(), false, true, true)
@@ -140,7 +154,7 @@ func bkrRunA0Target(t *testing.T, rec *bkrRecorder, spec bkrCaseSpec, targetLeve
 	}
 
 	result, checkErr := bkrValidateA0Outputs(t, spec, targetLevel, expectedOutputLevel, residualParams, outputs, wants)
-	if err := writeBootstrapKeyReuseResult(rec, result, material, runtimeMetrics); err != nil {
+	if err := writeBootstrapKeyReuseResult(rec, result, material, runtimeMetrics, baseline); err != nil {
 		return err
 	}
 	if checkErr != nil {
@@ -436,6 +450,198 @@ func TestBootstrapKeyReuseA0_OutputLevelMismatchFails(t *testing.T) {
 
 func TestBootstrapKeyReuseA0_OutputScaleMismatchFails(t *testing.T) {
 	bkrRunA0ExpectedFailure(t, bkrCaseOutputScaleMismatch())
+}
+
+func TestBootstrapKeyReuseA0_CSVOnlyOutputContract(t *testing.T) {
+	runDir := t.TempDir()
+	bkrSetResultDirForTest(t, runDir)
+
+	if err := runBootstrapKeyReuseA0(t, bkrCaseP0TinyNativeSingle()); err != nil {
+		t.Fatal(err)
+	}
+
+	bkrAssertCSVOnlyOutput(t, runDir)
+
+	materialRows := bkrReadCSVForTest(t, filepath.Join(runDir, "material_metrics.csv"))
+	galoisRows := bkrReadCSVForTest(t, filepath.Join(runDir, "galois_key_baseline.csv"))
+	encodedRows := bkrReadCSVForTest(t, filepath.Join(runDir, "encoded_diagonal_baseline.csv"))
+	indexRows := bkrReadCSVForTest(t, filepath.Join(runDir, "material_baseline_index.csv"))
+
+	if len(materialRows) != 2 {
+		t.Fatalf("material_metrics.csv rows=%d, want header + one target row", len(materialRows))
+	}
+	if len(galoisRows) != 2 {
+		t.Fatalf("galois_key_baseline.csv rows=%d, want header + one target row", len(galoisRows))
+	}
+	if len(indexRows) != 2 {
+		t.Fatalf("material_baseline_index.csv rows=%d, want header + one target row", len(indexRows))
+	}
+
+	rotationMetric := bkrCSVIntForTest(t, materialRows, 1, "generated_rotation_key_count")
+	diagonalMetric := bkrCSVIntForTest(t, materialRows, 1, "generated_encoded_diagonal_count")
+	galoisGenerated := bkrCSVIntForTest(t, galoisRows, 1, "generated_count")
+
+	if rotationMetric != galoisGenerated {
+		t.Fatalf("rotation count mismatch: material_metrics=%d galois_baseline=%d", rotationMetric, galoisGenerated)
+	}
+	if diagonalMetric != len(encodedRows)-1 {
+		t.Fatalf("encoded diagonal count mismatch: material_metrics=%d encoded_diagonal_baseline=%d", diagonalMetric, len(encodedRows)-1)
+	}
+	if got := bkrCSVValueForTest(t, indexRows, 1, "rotation_count_matches_metrics"); got != "true" {
+		t.Fatalf("rotation_count_matches_metrics=%q, want true", got)
+	}
+	if got := bkrCSVValueForTest(t, indexRows, 1, "encoded_diagonal_count_matches_metrics"); got != "true" {
+		t.Fatalf("encoded_diagonal_count_matches_metrics=%q, want true", got)
+	}
+}
+
+func TestBootstrapKeyReuseA0_CSVOnlyFailureSummary(t *testing.T) {
+	runDir := t.TempDir()
+	bkrSetResultDirForTest(t, runDir)
+
+	if err := runBootstrapKeyReuseA0(t, bkrCaseInvalidTarget()); err == nil {
+		t.Fatal("expected invalid target case to fail")
+	}
+
+	bkrAssertCSVOnlyOutput(t, runDir)
+
+	summaryRows := bkrReadCSVForTest(t, filepath.Join(runDir, "summary.csv"))
+	failuresRows := bkrReadCSVForTest(t, filepath.Join(runDir, "failures.csv"))
+
+	if got := bkrCSVValueForTest(t, summaryRows, 1, "status"); got != "fail" {
+		t.Fatalf("summary status=%q, want fail", got)
+	}
+	if len(failuresRows) < 2 {
+		t.Fatalf("failures.csv rows=%d, want at least one failure row", len(failuresRows))
+	}
+}
+
+func TestBootstrapKeyReuseCSVHelpers(t *testing.T) {
+	if got, want := bkrJoinInts([]int{1, 2, 3}), "1;2;3"; got != want {
+		t.Fatalf("bkrJoinInts=%q, want %q", got, want)
+	}
+	if got, want := bkrJoinUint64s([]uint64{5, 7, 11}), "5;7;11"; got != want {
+		t.Fatalf("bkrJoinUint64s=%q, want %q", got, want)
+	}
+	if bkrHashStringList([]string{"b", "a"}) != bkrHashStringList([]string{"a", "b"}) {
+		t.Fatal("bkrHashStringList must be order-stable")
+	}
+
+	path := filepath.Join(t.TempDir(), "escaping.csv")
+	if err := bkrWriteCSVFile(path, []string{"a", "b"}, [][]string{{"x;y", "line\nbreak"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	rows := bkrReadCSVForTest(t, path)
+	if got, want := rows[1], []string{"x;y", "line\nbreak"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("CSV escaping row=%q, want %q", got, want)
+	}
+}
+
+func bkrSetResultDirForTest(t *testing.T, dir string) {
+	t.Helper()
+	previous := *bkrResultDir
+	*bkrResultDir = dir
+	t.Cleanup(func() {
+		*bkrResultDir = previous
+	})
+}
+
+func bkrAssertCSVOnlyOutput(t *testing.T, dir string) {
+	t.Helper()
+
+	expected := bkrExpectedCSVHeadersForTest()
+	for _, file := range bkrRequiredCSVFiles {
+		path := filepath.Join(dir, file)
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("missing required CSV %s: %v", file, err)
+		}
+
+		rows := bkrReadCSVForTest(t, path)
+		if len(rows) == 0 {
+			t.Fatalf("%s has no header", file)
+		}
+		if !reflect.DeepEqual(rows[0], expected[file]) {
+			t.Fatalf("%s header mismatch:\n got %q\nwant %q", file, rows[0], expected[file])
+		}
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			t.Fatalf("unexpected directory in result dir: %s", entry.Name())
+		}
+		if filepath.Ext(entry.Name()) != ".csv" {
+			t.Fatalf("unexpected non-CSV output file: %s", entry.Name())
+		}
+		if _, ok := expected[entry.Name()]; !ok {
+			t.Fatalf("unexpected CSV output file: %s", entry.Name())
+		}
+	}
+}
+
+func bkrExpectedCSVHeadersForTest() map[string][]string {
+	return map[string][]string{
+		"metadata.csv":                           bkrMetadataCSVHeader,
+		"experiment_case.csv":                    bkrExperimentCaseCSVHeader,
+		"target_results.csv":                     bkrTargetResultsCSVHeader,
+		"material_metrics.csv":                   bkrMaterialMetricsCSVHeader,
+		"runtime_metrics.csv":                    bkrRuntimeMetricsCSVHeader,
+		"parameter_chain_baseline.csv":           bkrParameterChainBaselineCSVHeader,
+		"galois_key_baseline.csv":                bkrGaloisKeyBaselineCSVHeader,
+		"linear_transform_schedule_baseline.csv": bkrLinearTransformScheduleBaselineCSVHeader,
+		"encoded_diagonal_baseline.csv":          bkrEncodedDiagonalBaselineCSVHeader,
+		"material_baseline_index.csv":            bkrMaterialBaselineIndexCSVHeader,
+		"failures.csv":                           bkrFailuresCSVHeader,
+		"summary.csv":                            bkrSummaryCSVHeader,
+	}
+}
+
+func bkrReadCSVForTest(t *testing.T, path string) [][]string {
+	t.Helper()
+
+	file, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+
+	rows, err := csv.NewReader(file).ReadAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return rows
+}
+
+func bkrCSVValueForTest(t *testing.T, rows [][]string, row int, column string) string {
+	t.Helper()
+
+	if len(rows) <= row {
+		t.Fatalf("CSV has %d rows, cannot read row %d", len(rows), row)
+	}
+	for i, header := range rows[0] {
+		if header == column {
+			if len(rows[row]) <= i {
+				t.Fatalf("CSV row %d has %d columns, cannot read %q at index %d", row, len(rows[row]), column, i)
+			}
+			return rows[row][i]
+		}
+	}
+	t.Fatalf("missing CSV column %q", column)
+	return ""
+}
+
+func bkrCSVIntForTest(t *testing.T, rows [][]string, row int, column string) int {
+	t.Helper()
+
+	value, err := strconv.Atoi(bkrCSVValueForTest(t, rows, row, column))
+	if err != nil {
+		t.Fatalf("cannot parse CSV column %q as int: %v", column, err)
+	}
+	return value
 }
 
 func BenchmarkBootstrapKeyReuseA0_P2MultiFastClustered(b *testing.B) {
