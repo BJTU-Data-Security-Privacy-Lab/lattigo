@@ -78,11 +78,11 @@ func bkrMeasurePhase(fn func() error) (time.Duration, uint64, error) {
 	return elapsed, peak, err
 }
 
-func collectBootstrapKeyReuseMetrics(spec bkrCaseSpec, targetLevel int, keys *EvaluationKeys, eval *Evaluator, baseline bkrMaterialBaselineDetails) bkrMaterialMetrics {
+func collectBootstrapKeyReuseMetrics(planID string, spec bkrCaseSpec, targetLevel int, keys *EvaluationKeys, eval *Evaluator, baseline bkrMaterialBaselineDetails) bkrMaterialMetrics {
 	return bkrMaterialMetrics{
 		RecordType:                    "MaterialMetrics",
 		SchemaVersion:                 bkrSchemaVersion,
-		PlanID:                        bkrPlanA0,
+		PlanID:                        planID,
 		CaseID:                        spec.CaseID,
 		ParamsProfile:                 spec.ProfileID,
 		TargetLevel:                   targetLevel,
@@ -102,16 +102,16 @@ func collectBootstrapKeyReuseMetrics(spec bkrCaseSpec, targetLevel int, keys *Ev
 	}
 }
 
-func collectBootstrapKeyReuseBaselineDetails(spec bkrCaseSpec, targetLevel int, btpParams Parameters, keys *EvaluationKeys, eval *Evaluator) (bkrMaterialBaselineDetails, error) {
+func collectBootstrapKeyReuseBaselineDetails(planID string, spec bkrCaseSpec, targetLevel int, btpParams Parameters, keys *EvaluationKeys, eval *Evaluator) (bkrMaterialBaselineDetails, error) {
 	fullParams, err := ckks.NewParametersFromLiteral(spec.SchemeParams)
 	if err != nil {
 		return bkrMaterialBaselineDetails{}, fmt.Errorf("cannot instantiate full profile parameters for baseline details: %w", err)
 	}
 
-	galois := bkrCollectGaloisKeyBaseline(spec, targetLevel, btpParams, keys)
+	galois := bkrCollectGaloisKeyBaseline(planID, spec, targetLevel, btpParams, keys)
 
-	c2sSchedules := bkrMatrixScheduleRecords(spec, targetLevel, "coeffs_to_slots", eval.C2SDFTMatrix, btpParams.BootstrappingParameters)
-	s2cSchedules := bkrMatrixScheduleRecords(spec, targetLevel, "slots_to_coeffs", eval.S2CDFTMatrix, btpParams.BootstrappingParameters)
+	c2sSchedules := bkrMatrixScheduleRecords(planID, spec, targetLevel, "coeffs_to_slots", eval.C2SDFTMatrix, btpParams.BootstrappingParameters)
+	s2cSchedules := bkrMatrixScheduleRecords(planID, spec, targetLevel, "slots_to_coeffs", eval.S2CDFTMatrix, btpParams.BootstrappingParameters)
 	schedules := append(c2sSchedules, s2cSchedules...)
 
 	c2sScheduleHash := ""
@@ -123,11 +123,11 @@ func collectBootstrapKeyReuseBaselineDetails(spec bkrCaseSpec, targetLevel int, 
 		s2cScheduleHash = s2cSchedules[0].MatrixScheduleID
 	}
 
-	c2sDiagonals, err := bkrEncodedDiagonalRecords(spec, targetLevel, "coeffs_to_slots", eval.C2SDFTMatrix, btpParams.BootstrappingParameters)
+	c2sDiagonals, err := bkrEncodedDiagonalRecords(planID, spec, targetLevel, "coeffs_to_slots", eval.C2SDFTMatrix, btpParams.BootstrappingParameters)
 	if err != nil {
 		return bkrMaterialBaselineDetails{}, err
 	}
-	s2cDiagonals, err := bkrEncodedDiagonalRecords(spec, targetLevel, "slots_to_coeffs", eval.S2CDFTMatrix, btpParams.BootstrappingParameters)
+	s2cDiagonals, err := bkrEncodedDiagonalRecords(planID, spec, targetLevel, "slots_to_coeffs", eval.S2CDFTMatrix, btpParams.BootstrappingParameters)
 	if err != nil {
 		return bkrMaterialBaselineDetails{}, err
 	}
@@ -143,7 +143,7 @@ func collectBootstrapKeyReuseBaselineDetails(spec bkrCaseSpec, targetLevel int, 
 		ParameterChain: bkrParameterChainBaseline{
 			RecordType:                    "ParameterChainBaseline",
 			SchemaVersion:                 bkrSchemaVersion,
-			PlanID:                        bkrPlanA0,
+			PlanID:                        planID,
 			CaseID:                        spec.CaseID,
 			ParamsProfile:                 spec.ProfileID,
 			TargetLevel:                   targetLevel,
@@ -175,7 +175,7 @@ func collectBootstrapKeyReuseBaselineDetails(spec bkrCaseSpec, targetLevel int, 
 		Index: bkrMaterialBaselineIndex{
 			RecordType:                   "MaterialBaselineIndex",
 			SchemaVersion:                bkrSchemaVersion,
-			PlanID:                       bkrPlanA0,
+			PlanID:                       planID,
 			CaseID:                       spec.CaseID,
 			ParamsProfile:                spec.ProfileID,
 			TargetLevel:                  targetLevel,
@@ -200,7 +200,7 @@ func completeBootstrapKeyReuseBaselineIndex(baseline *bkrMaterialBaselineDetails
 	baseline.Index.EncodedDiagonalCountMatchesMetrics = baseline.Index.EncodedDiagonalRecordCount == material.GeneratedEncodedDiagonalCount
 }
 
-func bkrCollectGaloisKeyBaseline(spec bkrCaseSpec, targetLevel int, btpParams Parameters, keys *EvaluationKeys) bkrGaloisKeyBaseline {
+func bkrCollectGaloisKeyBaseline(planID string, spec bkrCaseSpec, targetLevel int, btpParams Parameters, keys *EvaluationKeys) bkrGaloisKeyBaseline {
 	generated := bkrSortedGaloisElements(keys)
 	required := append([]uint64(nil), btpParams.GaloisElements(btpParams.BootstrappingParameters)...)
 	sort.Slice(required, func(i, j int) bool { return required[i] < required[j] })
@@ -217,7 +217,7 @@ func bkrCollectGaloisKeyBaseline(spec bkrCaseSpec, targetLevel int, btpParams Pa
 	return bkrGaloisKeyBaseline{
 		RecordType:                          "GaloisKeyBaseline",
 		SchemaVersion:                       bkrSchemaVersion,
-		PlanID:                              bkrPlanA0,
+		PlanID:                              planID,
 		CaseID:                              spec.CaseID,
 		ParamsProfile:                       spec.ProfileID,
 		TargetLevel:                         targetLevel,
@@ -243,7 +243,7 @@ func bkrSortedGaloisElements(keys *EvaluationKeys) []uint64 {
 	return galEls
 }
 
-func bkrMatrixScheduleRecords(spec bkrCaseSpec, targetLevel int, matrixName string, matrix dft.Matrix, params ckks.Parameters) []bkrLinearTransformScheduleBaseline {
+func bkrMatrixScheduleRecords(planID string, spec bkrCaseSpec, targetLevel int, matrixName string, matrix dft.Matrix, params ckks.Parameters) []bkrLinearTransformScheduleBaseline {
 	records := make([]bkrLinearTransformScheduleBaseline, 0, len(matrix.Matrices))
 	transformIDs := make([]string, 0, len(matrix.Matrices))
 
@@ -281,7 +281,7 @@ func bkrMatrixScheduleRecords(spec bkrCaseSpec, targetLevel int, matrixName stri
 		records = append(records, bkrLinearTransformScheduleBaseline{
 			RecordType:          "LinearTransformScheduleBaseline",
 			SchemaVersion:       bkrSchemaVersion,
-			PlanID:              bkrPlanA0,
+			PlanID:              planID,
 			CaseID:              spec.CaseID,
 			ParamsProfile:       spec.ProfileID,
 			TargetLevel:         targetLevel,
@@ -333,7 +333,7 @@ func bkrMatrixScheduleRecords(spec bkrCaseSpec, targetLevel int, matrixName stri
 	return records
 }
 
-func bkrEncodedDiagonalRecords(spec bkrCaseSpec, targetLevel int, matrixName string, matrix dft.Matrix, params ckks.Parameters) ([]bkrEncodedDiagonalBaseline, error) {
+func bkrEncodedDiagonalRecords(planID string, spec bkrCaseSpec, targetLevel int, matrixName string, matrix dft.Matrix, params ckks.Parameters) ([]bkrEncodedDiagonalBaseline, error) {
 	records := []bkrEncodedDiagonalBaseline{}
 
 	for transformIndex, lt := range matrix.Matrices {
@@ -367,7 +367,7 @@ func bkrEncodedDiagonalRecords(spec bkrCaseSpec, targetLevel int, matrixName str
 			records = append(records, bkrEncodedDiagonalBaseline{
 				RecordType:        "EncodedDiagonalBaseline",
 				SchemaVersion:     bkrSchemaVersion,
-				PlanID:            bkrPlanA0,
+				PlanID:            planID,
 				CaseID:            spec.CaseID,
 				ParamsProfile:     spec.ProfileID,
 				TargetLevel:       targetLevel,

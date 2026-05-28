@@ -30,11 +30,19 @@ var bkrResultDir = flag.String("bkr.result-dir", "", "directory for bootstrap ke
 const (
 	bkrSchemaVersion    = "bootstrap-key-reuse-test/v1"
 	bkrLaneA0           = "a0"
+	bkrLaneA1           = "a1"
 	bkrPlanA0           = "A0_FullKeyPerTargetLevel"
+	bkrPlanA1           = "A1_UsedTargetLevelsOnly"
 	bkrDefaultSeed      = "bootstrap-key-reuse-a0-2026-05-28"
 	bkrMinPrecisionBits = 12.0
 	bkrPackedCiphertext = 4
 )
+
+type bkrRunConfig struct {
+	Lane         string
+	PlanID       string
+	TargetLevels []int
+}
 
 type bkrCaseSpec struct {
 	CaseID                      string
@@ -333,6 +341,7 @@ type bkrMaterialBaselineDetails struct {
 type bkrRecorder struct {
 	dir              string
 	spec             bkrCaseSpec
+	config           bkrRunConfig
 	start            time.Time
 	metadata         bkrMetadata
 	experimentCase   *bkrExperimentCase
@@ -345,6 +354,37 @@ type bkrRecorder struct {
 	encodedDiagonals []bkrEncodedDiagonalBaseline
 	materialIndices  []bkrMaterialBaselineIndex
 	failures         []bkrFailure
+}
+
+func bkrA0RunConfig(spec bkrCaseSpec) bkrRunConfig {
+	return bkrRunConfig{
+		Lane:         bkrLaneA0,
+		PlanID:       bkrPlanA0,
+		TargetLevels: append([]int(nil), spec.AllTargetLevels...),
+	}
+}
+
+func bkrA1RunConfig(spec bkrCaseSpec) bkrRunConfig {
+	return bkrRunConfig{
+		Lane:         bkrLaneA1,
+		PlanID:       bkrPlanA1,
+		TargetLevels: append([]int(nil), spec.UsedTargetLevels...),
+	}
+}
+
+func bkrNormalizeRunConfig(spec bkrCaseSpec, config bkrRunConfig) bkrRunConfig {
+	if config.Lane == "" {
+		config.Lane = bkrLaneA0
+	}
+	if config.PlanID == "" {
+		config.PlanID = bkrPlanA0
+	}
+	if config.TargetLevels == nil {
+		config.TargetLevels = append([]int(nil), spec.AllTargetLevels...)
+	} else {
+		config.TargetLevels = append([]int(nil), config.TargetLevels...)
+	}
+	return config
 }
 
 func buildBootstrapKeyReuseCase(caseID, profileID string, schemeParams ckks.ParametersLiteral, btpParams ParametersLiteral, allTargetLevels []int, opts ...func(*bkrCaseSpec)) bkrCaseSpec {
@@ -465,11 +505,11 @@ func newDeterministicSecretKey(params ckks.Parameters, seed string) (*rlwe.Secre
 	return sk, nil
 }
 
-func newBootstrapKeyReuseRecorder(t testing.TB, spec bkrCaseSpec) (*bkrRecorder, error) {
+func newBootstrapKeyReuseRecorder(t testing.TB, spec bkrCaseSpec, config bkrRunConfig) (*bkrRecorder, error) {
 	t.Helper()
 
 	if strings.TrimSpace(*bkrResultDir) == "" {
-		return nil, errors.New("missing -bkr.result-dir; A0 structured tests require an explicit result directory")
+		return nil, errors.New("missing -bkr.result-dir; bootstrap key reuse structured tests require an explicit result directory")
 	}
 
 	dir, err := bkrResolveResultDir(*bkrResultDir)
@@ -486,9 +526,10 @@ func newBootstrapKeyReuseRecorder(t testing.TB, spec bkrCaseSpec) (*bkrRecorder,
 	}
 
 	rec := &bkrRecorder{
-		dir:   dir,
-		spec:  spec,
-		start: time.Now(),
+		dir:    dir,
+		spec:   spec,
+		config: bkrNormalizeRunConfig(spec, config),
+		start:  time.Now(),
 	}
 
 	if err := rec.writeMetadata(); err != nil {
@@ -519,7 +560,7 @@ func (r *bkrRecorder) writeExperimentCase() error {
 	experimentCase := bkrExperimentCase{
 		RecordType:          "ExperimentCase",
 		SchemaVersion:       bkrSchemaVersion,
-		PlanID:              bkrPlanA0,
+		PlanID:              r.config.PlanID,
 		CaseID:              spec.CaseID,
 		ParamsProfile:       spec.ProfileID,
 		AllTargetLevels:     append([]int(nil), spec.AllTargetLevels...),
@@ -539,7 +580,7 @@ func (r *bkrRecorder) writeFailure(targetLevel int, stage, message string, befor
 	failure := bkrFailure{
 		RecordType:       "Failure",
 		SchemaVersion:    bkrSchemaVersion,
-		PlanID:           bkrPlanA0,
+		PlanID:           r.config.PlanID,
 		CaseID:           r.spec.CaseID,
 		ParamsProfile:    r.spec.ProfileID,
 		TargetLevel:      targetLevel,
@@ -555,22 +596,24 @@ func (r *bkrRecorder) writeFailure(targetLevel int, stage, message string, befor
 
 func (r *bkrRecorder) writeSummary(successfulTargets int) (bkrRunSummary, error) {
 	finished := time.Now()
+	targetLevels := append([]int(nil), r.config.TargetLevels...)
+	totalTargets := len(targetLevels)
 	summary := bkrRunSummary{
 		SchemaVersion:      bkrSchemaVersion,
-		Lane:               bkrLaneA0,
-		PlanID:             bkrPlanA0,
+		Lane:               r.config.Lane,
+		PlanID:             r.config.PlanID,
 		CaseID:             r.spec.CaseID,
 		ParamsProfile:      r.spec.ProfileID,
 		Status:             "fail",
-		TargetLevels:       append([]int(nil), r.spec.AllTargetLevels...),
+		TargetLevels:       targetLevels,
 		ResultDirectory:    r.dir,
 		StartedAt:          r.start.Format(time.RFC3339Nano),
 		FinishedAt:         finished.Format(time.RFC3339Nano),
 		ElapsedMS:          bkrDurationMS(finished.Sub(r.start)),
-		TotalTargets:       len(r.spec.AllTargetLevels),
+		TotalTargets:       totalTargets,
 		SuccessfulTargets:  successfulTargets,
-		FailedTargets:      len(r.spec.AllTargetLevels) - successfulTargets,
-		Passed:             len(r.failures) == 0 && successfulTargets == len(r.spec.AllTargetLevels),
+		FailedTargets:      totalTargets - successfulTargets,
+		Passed:             len(r.failures) == 0 && successfulTargets == totalTargets,
 		FailureCount:       len(r.failures),
 		Failures:           append([]bkrFailure(nil), r.failures...),
 		SharedRotationKeys: 0,
@@ -592,8 +635,8 @@ func (r *bkrRecorder) writeSummary(successfulTargets int) (bkrRunSummary, error)
 func (r *bkrRecorder) writeMetadata() error {
 	metadata := bkrMetadata{
 		SchemaVersion: bkrSchemaVersion,
-		Lane:          bkrLaneA0,
-		PlanID:        bkrPlanA0,
+		Lane:          r.config.Lane,
+		PlanID:        r.config.PlanID,
 		CaseID:        r.spec.CaseID,
 		ParamsProfile: r.spec.ProfileID,
 		Command:       strings.Join(os.Args, " "),

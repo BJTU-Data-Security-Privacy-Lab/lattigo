@@ -234,8 +234,11 @@ A0 必测：
 A1 必测：
 
 - 只生成 `UsedTargetLevels`；
-- unused target levels 必须无 keygen 记录；
-- used levels 的 level、scale、precision 必须满足 A0 标准。
+- 支持通过内包 target-level dispatcher 显式 bootstrap 到指定 `targetLevel`；
+- unused target levels 必须无 keygen、material、runtime 和 baseline CSV 记录；
+- used levels 的 level、scale、precision 必须满足 A0 标准；
+- `target_results.csv`、`material_metrics.csv`、`runtime_metrics.csv` 和所有 baseline CSV 的 target set 必须严格等于 `UsedTargetLevels`；
+- dispatcher 请求未配置 target level 时必须失败，不能 fallback、临时 keygen 或高 level bootstrap 后 `DropLevel`。
 
 A2 必测：
 

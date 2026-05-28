@@ -25,7 +25,7 @@ func runBootstrapKeyReuseA0(t *testing.T, spec bkrCaseSpec) error {
 		t.Skip("long A0 bootstrap key reuse case; rerun with -args -long")
 	}
 
-	rec, err := newBootstrapKeyReuseRecorder(t, spec)
+	rec, err := newBootstrapKeyReuseRecorder(t, spec, bkrA0RunConfig(spec))
 	if err != nil {
 		return err
 	}
@@ -114,7 +114,7 @@ func bkrRunA0Target(t *testing.T, rec *bkrRecorder, spec bkrCaseSpec, targetLeve
 		return err
 	}
 
-	baseline, err := collectBootstrapKeyReuseBaselineDetails(spec, targetLevel, btpParams, keys, eval)
+	baseline, err := collectBootstrapKeyReuseBaselineDetails(bkrPlanA0, spec, targetLevel, btpParams, keys, eval)
 	if err != nil {
 		runtimePeak := runtimeSampler.stopAndMax()
 		_ = runtimePeak
@@ -122,7 +122,7 @@ func bkrRunA0Target(t *testing.T, rec *bkrRecorder, spec bkrCaseSpec, targetLeve
 		return err
 	}
 
-	material := collectBootstrapKeyReuseMetrics(spec, targetLevel, keys, eval, baseline)
+	material := collectBootstrapKeyReuseMetrics(bkrPlanA0, spec, targetLevel, keys, eval, baseline)
 	completeBootstrapKeyReuseBaselineIndex(&baseline, material)
 
 	bootstrapStart := time.Now()
@@ -145,7 +145,7 @@ func bkrRunA0Target(t *testing.T, rec *bkrRecorder, spec bkrCaseSpec, targetLeve
 	}
 
 	if bootstrapErr != nil {
-		result := bkrEmptyTargetRunResult(spec, targetLevel, expectedOutputLevel, residualParams, bootstrapErr.Error())
+		result := bkrEmptyTargetRunResult(bkrPlanA0, spec, targetLevel, expectedOutputLevel, residualParams, bootstrapErr.Error())
 		if err := writeBootstrapKeyReuseResult(rec, result, material, runtimeMetrics, baseline); err != nil {
 			return err
 		}
@@ -153,7 +153,7 @@ func bkrRunA0Target(t *testing.T, rec *bkrRecorder, spec bkrCaseSpec, targetLeve
 		return bootstrapErr
 	}
 
-	result, checkErr := bkrValidateA0Outputs(t, spec, targetLevel, expectedOutputLevel, residualParams, outputs, wants)
+	result, checkErr := bkrValidateBootstrapKeyReuseOutputs(t, bkrPlanA0, spec, targetLevel, expectedOutputLevel, residualParams, outputs, wants)
 	if err := writeBootstrapKeyReuseResult(rec, result, material, runtimeMetrics, baseline); err != nil {
 		return err
 	}
@@ -230,7 +230,7 @@ func bkrBootstrapA0Ciphertexts(spec bkrCaseSpec, params ckks.Parameters, eval *E
 	return outputs, wants, nil
 }
 
-func bkrValidateA0Outputs(t *testing.T, spec bkrCaseSpec, targetLevel, expectedOutputLevel int, params ckks.Parameters, outputs []rlwe.Ciphertext, wants [][]complex128) (bkrTargetRunResult, error) {
+func bkrValidateBootstrapKeyReuseOutputs(t *testing.T, planID string, spec bkrCaseSpec, targetLevel, expectedOutputLevel int, params ckks.Parameters, outputs []rlwe.Ciphertext, wants [][]complex128) (bkrTargetRunResult, error) {
 	t.Helper()
 
 	expectedScale := params.DefaultScale()
@@ -248,7 +248,7 @@ func bkrValidateA0Outputs(t *testing.T, spec bkrCaseSpec, targetLevel, expectedO
 	encoder := ckks.NewEncoder(params)
 	decryptorSeed, err := newDeterministicSecretKey(params, spec.Seed+"/secret-key")
 	if err != nil {
-		return bkrEmptyTargetRunResult(spec, targetLevel, expectedOutputLevel, params, err.Error()), err
+		return bkrEmptyTargetRunResult(planID, spec, targetLevel, expectedOutputLevel, params, err.Error()), err
 	}
 	decryptor := rlwe.NewDecryptor(params, decryptorSeed)
 
@@ -284,7 +284,7 @@ func bkrValidateA0Outputs(t *testing.T, spec bkrCaseSpec, targetLevel, expectedO
 	result := bkrTargetRunResult{
 		RecordType:              "TargetRunResult",
 		SchemaVersion:           bkrSchemaVersion,
-		PlanID:                  bkrPlanA0,
+		PlanID:                  planID,
 		CaseID:                  spec.CaseID,
 		ParamsProfile:           spec.ProfileID,
 		TargetLevel:             targetLevel,
@@ -315,7 +315,7 @@ func bkrValidateA0Outputs(t *testing.T, spec bkrCaseSpec, targetLevel, expectedO
 	return result, validationErr
 }
 
-func bkrEmptyTargetRunResult(spec bkrCaseSpec, targetLevel, expectedOutputLevel int, params ckks.Parameters, status string) bkrTargetRunResult {
+func bkrEmptyTargetRunResult(planID string, spec bkrCaseSpec, targetLevel, expectedOutputLevel int, params ckks.Parameters, status string) bkrTargetRunResult {
 	expectedScale := params.DefaultScale()
 	if spec.ExpectedScaleLogOverride != nil {
 		expectedScale = rlwe.NewScale(math.Exp2(float64(*spec.ExpectedScaleLogOverride)))
@@ -324,7 +324,7 @@ func bkrEmptyTargetRunResult(spec bkrCaseSpec, targetLevel, expectedOutputLevel 
 	return bkrTargetRunResult{
 		RecordType:              "TargetRunResult",
 		SchemaVersion:           bkrSchemaVersion,
-		PlanID:                  bkrPlanA0,
+		PlanID:                  planID,
 		CaseID:                  spec.CaseID,
 		ParamsProfile:           spec.ProfileID,
 		TargetLevel:             targetLevel,

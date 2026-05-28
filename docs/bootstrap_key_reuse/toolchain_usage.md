@@ -101,6 +101,16 @@ go test ./circuits/ckks/bootstrapping `
   -args '-bkr.result-dir' docs/bootstrap_key_reuse/results/dev_a0_p0
 ```
 
+A1 专用示例：
+
+```powershell
+go test ./circuits/ckks/bootstrapping `
+  -run '^TestBootstrapKeyReuseA1_P2MultiFastUsedSparse$' `
+  -count=1 `
+  -timeout=30m `
+  -args -print-precision '-bkr.result-dir' docs/bootstrap_key_reuse/results/dev_a1_p2_sparse
+```
+
 不要写成未加引号的 `-bkr.result-dir`，否则 PowerShell 可能把它传成 `-bkr`，Go
 test 会报 `flag provided but not defined: -bkr`。
 
