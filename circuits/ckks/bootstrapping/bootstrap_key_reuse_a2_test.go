@@ -94,6 +94,11 @@ func runBootstrapKeyReuseA2(t *testing.T, spec bkrCaseSpec) error {
 
 func bkrPrepareA2Target(t *testing.T, rec *bkrRecorder, spec bkrCaseSpec, targetLevel int, pool *bkrRotationKeyPool) (*bkrA1PreparedTarget, error) {
 	t.Helper()
+	return bkrPrepareA2TargetForPlan(t, rec, spec, targetLevel, pool, bkrPlanA2)
+}
+
+func bkrPrepareA2TargetForPlan(t *testing.T, rec *bkrRecorder, spec bkrCaseSpec, targetLevel int, pool *bkrRotationKeyPool, planID string) (*bkrA1PreparedTarget, error) {
+	t.Helper()
 
 	expectedOutputLevel := targetLevel
 	if spec.ExpectedOutputLevelOverride != nil {
@@ -144,13 +149,13 @@ func bkrPrepareA2Target(t *testing.T, rec *bkrRecorder, spec bkrCaseSpec, target
 		return nil, err
 	}
 
-	baseline, err := collectBootstrapKeyReuseBaselineDetails(bkrPlanA2, spec, targetLevel, btpParams, keys, eval)
+	baseline, err := collectBootstrapKeyReuseBaselineDetails(planID, spec, targetLevel, btpParams, keys, eval)
 	if err != nil {
 		_ = rec.writeFailure(targetLevel, "baseline_details", err.Error(), false, true, false)
 		return nil, err
 	}
 
-	material := collectBootstrapKeyReuseMetrics(bkrPlanA2, spec, targetLevel, keys, eval, baseline)
+	material := collectBootstrapKeyReuseMetrics(planID, spec, targetLevel, keys, eval, baseline)
 	shared, fallbackReason := bkrRotationViewStats(rotationViewRecords)
 	owned := bkrOwnedRotationKeys(rotationViewRecords, targetLevel)
 	material.GeneratedRotationKeyCount = len(owned)
@@ -261,6 +266,11 @@ func bkrDefaultA2RotationKeyDomain(spec bkrCaseSpec, targetLevel int, btpParams 
 
 func bkrRunA2BootstrapTarget(t *testing.T, rec *bkrRecorder, spec bkrCaseSpec, dispatcher *targetLevelBootstrapper, target *bkrA1PreparedTarget) error {
 	t.Helper()
+	return bkrRunA2BootstrapTargetForPlan(t, rec, spec, dispatcher, target, bkrPlanA2)
+}
+
+func bkrRunA2BootstrapTargetForPlan(t *testing.T, rec *bkrRecorder, spec bkrCaseSpec, dispatcher *targetLevelBootstrapper, target *bkrA1PreparedTarget, planID string) error {
+	t.Helper()
 
 	runtimeSampler := newBKRHeapSampler()
 	bootstrapStart := time.Now()
@@ -271,7 +281,7 @@ func bkrRunA2BootstrapTarget(t *testing.T, rec *bkrRecorder, spec bkrCaseSpec, d
 	runtimeMetrics := bkrRuntimeMetrics{
 		RecordType:                    "RuntimeMetrics",
 		SchemaVersion:                 bkrSchemaVersion,
-		PlanID:                        bkrPlanA2,
+		PlanID:                        planID,
 		CaseID:                        spec.CaseID,
 		ParamsProfile:                 spec.ProfileID,
 		TargetLevel:                   target.targetLevel,
@@ -284,7 +294,7 @@ func bkrRunA2BootstrapTarget(t *testing.T, rec *bkrRecorder, spec bkrCaseSpec, d
 	rec.addRotationKeyViewRecords(target.rotationViewRecords)
 
 	if bootstrapErr != nil {
-		result := bkrEmptyTargetRunResult(bkrPlanA2, spec, target.targetLevel, target.expectedOutputLevel, target.residualParams, bootstrapErr.Error())
+		result := bkrEmptyTargetRunResult(planID, spec, target.targetLevel, target.expectedOutputLevel, target.residualParams, bootstrapErr.Error())
 		if err := writeBootstrapKeyReuseResult(rec, result, target.material, runtimeMetrics, target.baseline); err != nil {
 			return err
 		}
@@ -292,7 +302,7 @@ func bkrRunA2BootstrapTarget(t *testing.T, rec *bkrRecorder, spec bkrCaseSpec, d
 		return bootstrapErr
 	}
 
-	result, checkErr := bkrValidateBootstrapKeyReuseOutputs(t, bkrPlanA2, spec, target.targetLevel, target.expectedOutputLevel, target.residualParams, outputs, wants)
+	result, checkErr := bkrValidateBootstrapKeyReuseOutputs(t, planID, spec, target.targetLevel, target.expectedOutputLevel, target.residualParams, outputs, wants)
 	if err := writeBootstrapKeyReuseResult(rec, result, target.material, runtimeMetrics, target.baseline); err != nil {
 		return err
 	}

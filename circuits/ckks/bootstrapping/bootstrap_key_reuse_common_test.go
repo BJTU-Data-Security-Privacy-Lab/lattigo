@@ -32,9 +32,13 @@ const (
 	bkrLaneA0           = "a0"
 	bkrLaneA1           = "a1"
 	bkrLaneA2           = "a2"
+	bkrLaneA3           = "a3"
+	bkrLaneA4           = "a4"
 	bkrPlanA0           = "A0_FullKeyPerTargetLevel"
 	bkrPlanA1           = "A1_UsedTargetLevelsOnly"
 	bkrPlanA2           = "A2_RotationKeyInterning"
+	bkrPlanA3           = "A3_LinearTransformScheduleInterning"
+	bkrPlanA4           = "A4_EncodedDiagonalCompatibilitySharing"
 	bkrDefaultSeed      = "bootstrap-key-reuse-a0-2026-05-28"
 	bkrMinPrecisionBits = 12.0
 	bkrPackedCiphertext = 4
@@ -420,6 +424,22 @@ func bkrA2RunConfig(spec bkrCaseSpec) bkrRunConfig {
 	return bkrRunConfig{
 		Lane:         bkrLaneA2,
 		PlanID:       bkrPlanA2,
+		TargetLevels: append([]int(nil), spec.UsedTargetLevels...),
+	}
+}
+
+func bkrA3RunConfig(spec bkrCaseSpec) bkrRunConfig {
+	return bkrRunConfig{
+		Lane:         bkrLaneA3,
+		PlanID:       bkrPlanA3,
+		TargetLevels: append([]int(nil), spec.UsedTargetLevels...),
+	}
+}
+
+func bkrA4RunConfig(spec bkrCaseSpec) bkrRunConfig {
+	return bkrRunConfig{
+		Lane:         bkrLaneA4,
+		PlanID:       bkrPlanA4,
 		TargetLevels: append([]int(nil), spec.UsedTargetLevels...),
 	}
 }
