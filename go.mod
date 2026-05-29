@@ -2,6 +2,8 @@ module github.com/tuneinsight/lattigo/v6
 
 go 1.25.0
 
+toolchain go1.25.9
+
 require (
 	github.com/google/go-cmp v0.7.0
 	github.com/stretchr/testify v1.10.0
