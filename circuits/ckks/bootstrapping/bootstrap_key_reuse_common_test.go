@@ -31,8 +31,10 @@ const (
 	bkrSchemaVersion    = "bootstrap-key-reuse-test/v1"
 	bkrLaneA0           = "a0"
 	bkrLaneA1           = "a1"
+	bkrLaneA2           = "a2"
 	bkrPlanA0           = "A0_FullKeyPerTargetLevel"
 	bkrPlanA1           = "A1_UsedTargetLevelsOnly"
+	bkrPlanA2           = "A2_RotationKeyInterning"
 	bkrDefaultSeed      = "bootstrap-key-reuse-a0-2026-05-28"
 	bkrMinPrecisionBits = 12.0
 	bkrPackedCiphertext = 4
@@ -330,6 +332,46 @@ type bkrMaterialBaselineIndex struct {
 	EncodedDiagonalCountMatchesMetrics   bool
 }
 
+type bkrRotationKeyPoolRecord struct {
+	RecordType           string
+	SchemaVersion        string
+	PlanID               string
+	CaseID               string
+	ParamsProfile        string
+	PoolID               string
+	DomainID             string
+	OwnerTargetLevel     int
+	ConsumerTargetLevels []int
+	GaloisElement        uint64
+	CanonicalRotationID  string
+	NthRoot              uint64
+	LevelQ               int
+	LevelP               int
+	BaseTwoDecomposition int
+	Compressed           bool
+	BinarySize           int64
+	PhysicalKeyGenerated bool
+	Status               string
+	FallbackReason       string
+}
+
+type bkrRotationKeyViewRecord struct {
+	RecordType          string
+	SchemaVersion       string
+	PlanID              string
+	CaseID              string
+	ParamsProfile       string
+	TargetLevel         int
+	GaloisElement       uint64
+	CanonicalRotationID string
+	DomainID            string
+	PoolID              string
+	OwnerTargetLevel    int
+	IsShared            bool
+	DomainCompatible    bool
+	FallbackReason      string
+}
+
 type bkrMaterialBaselineDetails struct {
 	ParameterChain   bkrParameterChainBaseline
 	GaloisKeys       bkrGaloisKeyBaseline
@@ -353,6 +395,8 @@ type bkrRecorder struct {
 	schedules        []bkrLinearTransformScheduleBaseline
 	encodedDiagonals []bkrEncodedDiagonalBaseline
 	materialIndices  []bkrMaterialBaselineIndex
+	rotationKeyPools []bkrRotationKeyPoolRecord
+	rotationKeyViews []bkrRotationKeyViewRecord
 	failures         []bkrFailure
 }
 
@@ -368,6 +412,14 @@ func bkrA1RunConfig(spec bkrCaseSpec) bkrRunConfig {
 	return bkrRunConfig{
 		Lane:         bkrLaneA1,
 		PlanID:       bkrPlanA1,
+		TargetLevels: append([]int(nil), spec.UsedTargetLevels...),
+	}
+}
+
+func bkrA2RunConfig(spec bkrCaseSpec) bkrRunConfig {
+	return bkrRunConfig{
+		Lane:         bkrLaneA2,
+		PlanID:       bkrPlanA2,
 		TargetLevels: append([]int(nil), spec.UsedTargetLevels...),
 	}
 }
@@ -555,6 +607,14 @@ func writeBootstrapKeyReuseResult(rec *bkrRecorder, result bkrTargetRunResult, m
 	return nil
 }
 
+func (r *bkrRecorder) addRotationKeyPoolRecords(records []bkrRotationKeyPoolRecord) {
+	r.rotationKeyPools = append(r.rotationKeyPools, records...)
+}
+
+func (r *bkrRecorder) addRotationKeyViewRecords(records []bkrRotationKeyViewRecord) {
+	r.rotationKeyViews = append(r.rotationKeyViews, records...)
+}
+
 func (r *bkrRecorder) writeExperimentCase() error {
 	spec := r.spec
 	experimentCase := bkrExperimentCase{
@@ -616,10 +676,10 @@ func (r *bkrRecorder) writeSummary(successfulTargets int) (bkrRunSummary, error)
 		Passed:             len(r.failures) == 0 && successfulTargets == totalTargets,
 		FailureCount:       len(r.failures),
 		Failures:           append([]bkrFailure(nil), r.failures...),
-		SharedRotationKeys: 0,
-		SharedDiagonals:    0,
+		SharedRotationKeys: bkrSumSharedRotationKeys(r.materialMetrics),
+		SharedDiagonals:    bkrSumSharedEncodedDiagonals(r.materialMetrics),
 		RNSSliceSuccess:    "not_applicable",
-		FallbackReason:     "none",
+		FallbackReason:     bkrAggregateFallbackReason(r.materialMetrics),
 	}
 	if summary.Passed {
 		summary.Status = "pass"
@@ -698,6 +758,8 @@ var (
 		"linear_transform_schedule_baseline.csv",
 		"encoded_diagonal_baseline.csv",
 		"material_baseline_index.csv",
+		"rotation_key_pool.csv",
+		"rotation_key_view.csv",
 		"failures.csv",
 		"summary.csv",
 	}
@@ -919,6 +981,46 @@ var (
 		"encoded_diagonal_count_matches_metrics",
 	}
 
+	bkrRotationKeyPoolCSVHeader = []string{
+		"record_type",
+		"schema_version",
+		"plan_id",
+		"case_id",
+		"params_profile",
+		"pool_id",
+		"domain_id",
+		"owner_target_level",
+		"consumer_target_levels",
+		"galois_element",
+		"canonical_rotation_id",
+		"nth_root",
+		"level_q",
+		"level_p",
+		"base_two_decomposition",
+		"compressed",
+		"binary_size",
+		"physical_key_generated",
+		"status",
+		"fallback_reason",
+	}
+
+	bkrRotationKeyViewCSVHeader = []string{
+		"record_type",
+		"schema_version",
+		"plan_id",
+		"case_id",
+		"params_profile",
+		"target_level",
+		"galois_element",
+		"canonical_rotation_id",
+		"domain_id",
+		"pool_id",
+		"owner_target_level",
+		"is_shared",
+		"domain_compatible",
+		"fallback_reason",
+	}
+
 	bkrFailuresCSVHeader = []string{
 		"record_type",
 		"schema_version",
@@ -969,6 +1071,8 @@ func (r *bkrRecorder) writeAllCSV(summary bkrRunSummary) error {
 	err = errors.Join(err, r.writeLinearTransformScheduleBaselineCSV())
 	err = errors.Join(err, r.writeEncodedDiagonalBaselineCSV())
 	err = errors.Join(err, r.writeMaterialBaselineIndexCSV())
+	err = errors.Join(err, r.writeRotationKeyPoolCSV())
+	err = errors.Join(err, r.writeRotationKeyViewCSV())
 	err = errors.Join(err, r.writeFailuresCSV())
 	err = errors.Join(err, r.writeSummaryCSV(summary))
 	return err
@@ -1249,6 +1353,58 @@ func (r *bkrRecorder) writeMaterialBaselineIndexCSV() error {
 	return bkrWriteCSVFile(filepath.Join(r.dir, "material_baseline_index.csv"), bkrMaterialBaselineIndexCSVHeader, rows)
 }
 
+func (r *bkrRecorder) writeRotationKeyPoolCSV() error {
+	rows := make([][]string, 0, len(r.rotationKeyPools))
+	for _, row := range r.rotationKeyPools {
+		rows = append(rows, []string{
+			row.RecordType,
+			row.SchemaVersion,
+			row.PlanID,
+			row.CaseID,
+			row.ParamsProfile,
+			row.PoolID,
+			row.DomainID,
+			strconv.Itoa(row.OwnerTargetLevel),
+			bkrJoinInts(row.ConsumerTargetLevels),
+			strconv.FormatUint(row.GaloisElement, 10),
+			row.CanonicalRotationID,
+			strconv.FormatUint(row.NthRoot, 10),
+			strconv.Itoa(row.LevelQ),
+			strconv.Itoa(row.LevelP),
+			strconv.Itoa(row.BaseTwoDecomposition),
+			strconv.FormatBool(row.Compressed),
+			strconv.FormatInt(row.BinarySize, 10),
+			strconv.FormatBool(row.PhysicalKeyGenerated),
+			row.Status,
+			row.FallbackReason,
+		})
+	}
+	return bkrWriteCSVFile(filepath.Join(r.dir, "rotation_key_pool.csv"), bkrRotationKeyPoolCSVHeader, rows)
+}
+
+func (r *bkrRecorder) writeRotationKeyViewCSV() error {
+	rows := make([][]string, 0, len(r.rotationKeyViews))
+	for _, row := range r.rotationKeyViews {
+		rows = append(rows, []string{
+			row.RecordType,
+			row.SchemaVersion,
+			row.PlanID,
+			row.CaseID,
+			row.ParamsProfile,
+			strconv.Itoa(row.TargetLevel),
+			strconv.FormatUint(row.GaloisElement, 10),
+			row.CanonicalRotationID,
+			row.DomainID,
+			row.PoolID,
+			strconv.Itoa(row.OwnerTargetLevel),
+			strconv.FormatBool(row.IsShared),
+			strconv.FormatBool(row.DomainCompatible),
+			row.FallbackReason,
+		})
+	}
+	return bkrWriteCSVFile(filepath.Join(r.dir, "rotation_key_view.csv"), bkrRotationKeyViewCSVHeader, rows)
+}
+
 func (r *bkrRecorder) writeFailuresCSV() error {
 	rows := make([][]string, 0, len(r.failures))
 	for _, row := range r.failures {
@@ -1476,6 +1632,39 @@ func bkrTargetStatus(result bkrTargetRunResult) string {
 		return "fail"
 	}
 	return "pass"
+}
+
+func bkrSumSharedRotationKeys(rows []bkrMaterialMetrics) (sum int) {
+	for _, row := range rows {
+		sum += row.SharedRotationKeys
+	}
+	return sum
+}
+
+func bkrSumSharedEncodedDiagonals(rows []bkrMaterialMetrics) (sum int) {
+	for _, row := range rows {
+		sum += row.SharedEncodedDiagonals
+	}
+	return sum
+}
+
+func bkrAggregateFallbackReason(rows []bkrMaterialMetrics) string {
+	reasons := map[string]bool{}
+	for _, row := range rows {
+		if row.FallbackReason == "" || row.FallbackReason == "none" {
+			continue
+		}
+		reasons[row.FallbackReason] = true
+	}
+	if len(reasons) == 0 {
+		return "none"
+	}
+	values := make([]string, 0, len(reasons))
+	for reason := range reasons {
+		values = append(values, reason)
+	}
+	sort.Strings(values)
+	return bkrJoinStrings(values)
 }
 
 func bkrCloneCKKSParametersLiteral(in ckks.ParametersLiteral) ckks.ParametersLiteral {

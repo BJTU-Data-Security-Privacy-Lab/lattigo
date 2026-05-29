@@ -26,6 +26,8 @@ type bkrA1PreparedTarget struct {
 	eval                *Evaluator
 	baseline            bkrMaterialBaselineDetails
 	material            bkrMaterialMetrics
+	rotationPoolRecords []bkrRotationKeyPoolRecord
+	rotationViewRecords []bkrRotationKeyViewRecord
 	keygenElapsed       time.Duration
 	keygenPeak          uint64
 	constructionElapsed time.Duration
@@ -203,6 +205,7 @@ func bkrPrepareA1Target(t *testing.T, rec *bkrRecorder, spec bkrCaseSpec, target
 
 	material := collectBootstrapKeyReuseMetrics(bkrPlanA1, spec, targetLevel, keys, eval, baseline)
 	completeBootstrapKeyReuseBaselineIndex(&baseline, material)
+	rotationPoolRecords, rotationViewRecords := bkrDefaultRotationKeyRecords(bkrPlanA1, spec, targetLevel, btpParams, keys)
 
 	return &bkrA1PreparedTarget{
 		targetLevel:         targetLevel,
@@ -214,6 +217,8 @@ func bkrPrepareA1Target(t *testing.T, rec *bkrRecorder, spec bkrCaseSpec, target
 		eval:                eval,
 		baseline:            baseline,
 		material:            material,
+		rotationPoolRecords: rotationPoolRecords,
+		rotationViewRecords: rotationViewRecords,
 		keygenElapsed:       keygenElapsed,
 		keygenPeak:          keygenPeak,
 		constructionElapsed: constructionElapsed,
@@ -242,6 +247,8 @@ func bkrRunA1BootstrapTarget(t *testing.T, rec *bkrRecorder, spec bkrCaseSpec, d
 		PeakKeygenHeapBytes:           target.keygenPeak,
 		PeakRuntimeHeapBytes:          runtimePeak,
 	}
+	rec.addRotationKeyPoolRecords(target.rotationPoolRecords)
+	rec.addRotationKeyViewRecords(target.rotationViewRecords)
 
 	if bootstrapErr != nil {
 		result := bkrEmptyTargetRunResult(bkrPlanA1, spec, target.targetLevel, target.expectedOutputLevel, target.residualParams, bootstrapErr.Error())
@@ -425,6 +432,8 @@ func bkrRunA1ChainedTargetSwitch(t *testing.T, rec *bkrRecorder, spec bkrCaseSpe
 		}
 
 		result, runtimeMetrics, ctOut, err := bkrRunA1ChainedBootstrapStage(t, spec, dispatcher, target, ct, values)
+		rec.addRotationKeyPoolRecords(target.rotationPoolRecords)
+		rec.addRotationKeyViewRecords(target.rotationViewRecords)
 		if writeErr := writeBootstrapKeyReuseResult(rec, result, target.material, runtimeMetrics, target.baseline); writeErr != nil {
 			runErr = errors.Join(runErr, writeErr)
 		}
@@ -769,6 +778,7 @@ func bkrAssertCSVTargetRowsForTest(t *testing.T, dir string, want []int) {
 		"linear_transform_schedule_baseline.csv",
 		"encoded_diagonal_baseline.csv",
 		"material_baseline_index.csv",
+		"rotation_key_view.csv",
 	} {
 		rows := bkrReadCSVForTest(t, filepath.Join(dir, file))
 		got := bkrCSVTargetLevelsForTest(t, rows)

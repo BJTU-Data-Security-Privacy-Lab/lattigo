@@ -194,10 +194,10 @@ func collectBootstrapKeyReuseBaselineDetails(planID string, spec bkrCaseSpec, ta
 }
 
 func completeBootstrapKeyReuseBaselineIndex(baseline *bkrMaterialBaselineDetails, material bkrMaterialMetrics) {
-	baseline.Index.MetricsGeneratedRotationKeyCount = material.GeneratedRotationKeyCount
-	baseline.Index.MetricsGeneratedEncodedDiagonalCount = material.GeneratedEncodedDiagonalCount
-	baseline.Index.RotationCountMatchesMetrics = baseline.Index.GeneratedRotationKeyCount == material.GeneratedRotationKeyCount
-	baseline.Index.EncodedDiagonalCountMatchesMetrics = baseline.Index.EncodedDiagonalRecordCount == material.GeneratedEncodedDiagonalCount
+	baseline.Index.MetricsGeneratedRotationKeyCount = material.GeneratedRotationKeyCount + material.SharedRotationKeys
+	baseline.Index.MetricsGeneratedEncodedDiagonalCount = material.GeneratedEncodedDiagonalCount + material.SharedEncodedDiagonals
+	baseline.Index.RotationCountMatchesMetrics = baseline.Index.GeneratedRotationKeyCount == baseline.Index.MetricsGeneratedRotationKeyCount
+	baseline.Index.EncodedDiagonalCountMatchesMetrics = baseline.Index.EncodedDiagonalRecordCount == baseline.Index.MetricsGeneratedEncodedDiagonalCount
 }
 
 func bkrCollectGaloisKeyBaseline(planID string, spec bkrCaseSpec, targetLevel int, btpParams Parameters, keys *EvaluationKeys) bkrGaloisKeyBaseline {

@@ -124,6 +124,9 @@ func bkrRunA0Target(t *testing.T, rec *bkrRecorder, spec bkrCaseSpec, targetLeve
 
 	material := collectBootstrapKeyReuseMetrics(bkrPlanA0, spec, targetLevel, keys, eval, baseline)
 	completeBootstrapKeyReuseBaselineIndex(&baseline, material)
+	rotationPoolRecords, rotationViewRecords := bkrDefaultRotationKeyRecords(bkrPlanA0, spec, targetLevel, btpParams, keys)
+	rec.addRotationKeyPoolRecords(rotationPoolRecords)
+	rec.addRotationKeyViewRecords(rotationViewRecords)
 
 	bootstrapStart := time.Now()
 	outputs, wants, bootstrapErr := bkrBootstrapA0Ciphertexts(spec, residualParams, eval, sk, targetLevel)
@@ -595,6 +598,8 @@ func bkrExpectedCSVHeadersForTest() map[string][]string {
 		"linear_transform_schedule_baseline.csv": bkrLinearTransformScheduleBaselineCSVHeader,
 		"encoded_diagonal_baseline.csv":          bkrEncodedDiagonalBaselineCSVHeader,
 		"material_baseline_index.csv":            bkrMaterialBaselineIndexCSVHeader,
+		"rotation_key_pool.csv":                  bkrRotationKeyPoolCSVHeader,
+		"rotation_key_view.csv":                  bkrRotationKeyViewCSVHeader,
 		"failures.csv":                           bkrFailuresCSVHeader,
 		"summary.csv":                            bkrSummaryCSVHeader,
 	}
