@@ -14,6 +14,7 @@ for durable context, harness constraints, and deeper references.
 
 - [A3 linear-transform schedule interning plan](bootstrap_key_reuse/a3_linear_transform_schedule_interning_plan.md)
 - [A4 encoded-diagonal compatibility sharing plan](bootstrap_key_reuse/a4_encoded_diagonal_compatibility_sharing_plan.md)
+- [A5 verified RNS-slice sharing plan](bootstrap_key_reuse/a5_verified_rns_slice_sharing_plan.md)
 
 ## Project Overview
 

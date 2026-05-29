@@ -34,11 +34,13 @@ const (
 	bkrLaneA2           = "a2"
 	bkrLaneA3           = "a3"
 	bkrLaneA4           = "a4"
+	bkrLaneA5           = "a5"
 	bkrPlanA0           = "A0_FullKeyPerTargetLevel"
 	bkrPlanA1           = "A1_UsedTargetLevelsOnly"
 	bkrPlanA2           = "A2_RotationKeyInterning"
 	bkrPlanA3           = "A3_LinearTransformScheduleInterning"
 	bkrPlanA4           = "A4_EncodedDiagonalCompatibilitySharing"
+	bkrPlanA5           = "A5_VerifiedRNSSliceSharing"
 	bkrDefaultSeed      = "bootstrap-key-reuse-a0-2026-05-28"
 	bkrMinPrecisionBits = 12.0
 	bkrPackedCiphertext = 4
@@ -444,6 +446,14 @@ func bkrA4RunConfig(spec bkrCaseSpec) bkrRunConfig {
 	}
 }
 
+func bkrA5RunConfig(spec bkrCaseSpec) bkrRunConfig {
+	return bkrRunConfig{
+		Lane:         bkrLaneA5,
+		PlanID:       bkrPlanA5,
+		TargetLevels: append([]int(nil), spec.UsedTargetLevels...),
+	}
+}
+
 func bkrNormalizeRunConfig(spec bkrCaseSpec, config bkrRunConfig) bkrRunConfig {
 	if config.Lane == "" {
 		config.Lane = bkrLaneA0
@@ -698,7 +708,7 @@ func (r *bkrRecorder) writeSummary(successfulTargets int) (bkrRunSummary, error)
 		Failures:           append([]bkrFailure(nil), r.failures...),
 		SharedRotationKeys: bkrSumSharedRotationKeys(r.materialMetrics),
 		SharedDiagonals:    bkrSumSharedEncodedDiagonals(r.materialMetrics),
-		RNSSliceSuccess:    "not_applicable",
+		RNSSliceSuccess:    bkrAggregateRNSSliceSuccess(r.materialMetrics),
 		FallbackReason:     bkrAggregateFallbackReason(r.materialMetrics),
 	}
 	if summary.Passed {
@@ -1666,6 +1676,25 @@ func bkrSumSharedEncodedDiagonals(rows []bkrMaterialMetrics) (sum int) {
 		sum += row.SharedEncodedDiagonals
 	}
 	return sum
+}
+
+func bkrAggregateRNSSliceSuccess(rows []bkrMaterialMetrics) string {
+	values := map[string]bool{}
+	for _, row := range rows {
+		if row.RNSSliceSuccess == "" {
+			continue
+		}
+		values[row.RNSSliceSuccess] = true
+	}
+	if len(values) == 0 {
+		return "not_applicable"
+	}
+	ordered := make([]string, 0, len(values))
+	for value := range values {
+		ordered = append(ordered, value)
+	}
+	sort.Strings(ordered)
+	return bkrJoinStrings(ordered)
 }
 
 func bkrAggregateFallbackReason(rows []bkrMaterialMetrics) string {
