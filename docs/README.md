@@ -16,6 +16,8 @@ for durable context, harness constraints, and deeper references.
 - [A4 encoded-diagonal compatibility sharing plan](bootstrap_key_reuse/a4_encoded_diagonal_compatibility_sharing_plan.md)
 - [A5 verified RNS-slice sharing plan](bootstrap_key_reuse/a5_verified_rns_slice_sharing_plan.md)
 - [A6 superset-output DropLevel view plan](bootstrap_key_reuse/a6_superset_output_drop_level_plan.md)
+- [Final target-level reuse spec](bootstrap_key_reuse/final_target_level_reuse_spec.md)
+- [Final target-level reuse implementation plan](bootstrap_key_reuse/final_target_level_reuse_implementation_plan.md)
 
 ## Project Overview
 
