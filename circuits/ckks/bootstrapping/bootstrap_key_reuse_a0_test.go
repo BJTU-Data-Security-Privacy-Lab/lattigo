@@ -233,7 +233,7 @@ func bkrBootstrapA0Ciphertexts(spec bkrCaseSpec, params ckks.Parameters, eval *E
 	return outputs, wants, nil
 }
 
-func bkrValidateBootstrapKeyReuseOutputs(t *testing.T, planID string, spec bkrCaseSpec, targetLevel, expectedOutputLevel int, params ckks.Parameters, outputs []rlwe.Ciphertext, wants [][]complex128) (bkrTargetRunResult, error) {
+func bkrValidateBootstrapKeyReuseOutputs(t testing.TB, planID string, spec bkrCaseSpec, targetLevel, expectedOutputLevel int, params ckks.Parameters, outputs []rlwe.Ciphertext, wants [][]complex128) (bkrTargetRunResult, error) {
 	t.Helper()
 
 	expectedScale := params.DefaultScale()

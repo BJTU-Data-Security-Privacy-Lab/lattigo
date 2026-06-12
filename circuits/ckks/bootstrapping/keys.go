@@ -68,54 +68,82 @@ type EvaluationKeys struct {
 //     and it is the user's responsibility to ensure that these parameters meet the target security and tweak them if necessary.
 func (p Parameters) GenEvaluationKeys(skN1 *rlwe.SecretKey) (btpkeys *EvaluationKeys, skN2 *rlwe.SecretKey, err error) {
 
+	// 声明残差参数环 N1 与自举参数环 N2 之间切换所需的 evaluation keys。
 	var EvkN1ToN2, EvkN2ToN1 *rlwe.EvaluationKey
+	// 声明标准复数环与共轭不变实环之间切换所需的 evaluation key。
 	var EvkRealToCmplx *rlwe.EvaluationKey
+	// 声明共轭不变实环切回标准复数环所需的 evaluation key。
 	var EvkCmplxToReal *rlwe.EvaluationKey
+	// 取出 bootstrap 阶段实际使用的 RLWE 参数，后续密钥都在这组参数下生成或扩展。
 	paramsN2 := p.BootstrappingParameters
 
+	// 创建 bootstrap 参数域下的密钥生成器。
 	kgen := rlwe.NewKeyGenerator(paramsN2)
 
+	// 如果残差参数和 bootstrap 参数的环维度不同，需要显式生成跨环或环类型切换密钥。
 	if p.ResidualParameters.N() != paramsN2.N() {
 		// If the ring degree do not match
 		// (if the residual parameters are Conjugate Invariant, N1 = N2/2)
+		// 生成 bootstrap 参数域下的临时秘密密钥 skN2。
 		skN2 = kgen.GenSecretKeyNew()
 
+		// 如果残差参数使用共轭不变环，需要生成实环和复数环之间的 ring-swap keys。
 		if p.ResidualParameters.RingType() == ring.ConjugateInvariant {
+			// 生成从复数表示到实表示、以及从实表示回到复数表示的切换密钥。
 			EvkCmplxToReal, EvkRealToCmplx = kgen.GenEvaluationKeysForRingSwapNew(skN2, skN1)
 		} else {
+			// 生成从原始残差秘密 skN1 切换到 bootstrap 秘密 skN2 的 evaluation key。
 			EvkN1ToN2 = kgen.GenEvaluationKeyNew(skN1, skN2)
+			// 生成从 bootstrap 秘密 skN2 切回原始残差秘密 skN1 的 evaluation key。
 			EvkN2ToN1 = kgen.GenEvaluationKeyNew(skN2, skN1)
 		}
 
 	} else {
 
+		// 如果两个参数集的环维度相同，只需要把 skN1 扩展到 bootstrap 参数的完整 Q/P 模数基。
 		ringQ := paramsN2.RingQ()
+		// 取出 bootstrap 参数的 P 基，用于 key-switching 的特殊模数。
 		ringP := paramsN2.RingP()
 
 		// Else, keeps the same secret, but extends to the full modulus of the bootstrapping parameters.
+		// 在 bootstrap 参数下分配新的 secret key 容器，承载扩展后的 skN2。
 		skN2 = rlwe.NewSecretKey(paramsN2)
+		// 分配一个临时多项式缓冲区，供基扩展过程复用。
 		buff := ringQ.NewPoly()
 
 		// Extends basis Q0 -> QL
+		// 将 skN1 的 Q0 分量扩展到 bootstrap 参数的完整 Q 基，并写入 skN2.Value.Q。
 		rlwe.ExtendBasisSmallNormAndCenterNTTMontgomery(ringQ, ringQ, skN1.Value.Q, buff, skN2.Value.Q)
 
 		// Extends basis Q0 -> P
+		// 将 skN1 的 Q0 分量扩展到 bootstrap 参数的 P 基，并写入 skN2.Value.P。
 		rlwe.ExtendBasisSmallNormAndCenterNTTMontgomery(ringQ, ringP, skN1.Value.Q, buff, skN2.Value.P)
 	}
 
+	// 生成 dense secret 与 sparse secret 之间封装/解封装所需的 evaluation keys。
 	EvkDenseToSparse, EvkSparseToDense := p.genEncapsulationEvaluationKeysNew(skN2)
 
+	// 生成 bootstrap 计算过程中乘法后重线性化所需的 relinearization key。
 	rlk := kgen.GenRelinearizationKeyNew(skN2)
+	// 生成 bootstrap 线性变换和复共轭所需的 Galois keys。
 	gks := kgen.GenGaloisKeysNew(append(p.GaloisElements(paramsN2), paramsN2.GaloisElementForComplexConjugation()), skN2)
 
+	// 汇总所有 bootstrap 所需的 evaluation keys，并返回对应的 bootstrap 秘密 skN2。
 	return &EvaluationKeys{
-		EvkN1ToN2:           EvkN1ToN2,
-		EvkN2ToN1:           EvkN2ToN1,
-		EvkRealToCmplx:      EvkRealToCmplx,
-		EvkCmplxToReal:      EvkCmplxToReal,
+		// 原始残差参数秘密到 bootstrap 参数秘密的切换密钥，只有跨普通环维度时非空。
+		EvkN1ToN2: EvkN1ToN2,
+		// bootstrap 参数秘密切回原始残差参数秘密的切换密钥，只有跨普通环维度时非空。
+		EvkN2ToN1: EvkN2ToN1,
+		// 共轭不变实环到标准复数环的切换密钥，只有 ring-swap 路径时非空。
+		EvkRealToCmplx: EvkRealToCmplx,
+		// 标准复数环到共轭不变实环的切换密钥，只有 ring-swap 路径时非空。
+		EvkCmplxToReal: EvkCmplxToReal,
+		// 将 relinearization key 和所有 Galois keys 打包成内存 evaluation key set。
 		MemEvaluationKeySet: rlwe.NewMemEvaluationKeySet(rlk, gks...),
-		EvkDenseToSparse:    EvkDenseToSparse,
-		EvkSparseToDense:    EvkSparseToDense,
+		// dense secret 到 sparse secret 的封装切换密钥。
+		EvkDenseToSparse: EvkDenseToSparse,
+		// sparse secret 到 dense secret 的解封装切换密钥。
+		EvkSparseToDense: EvkSparseToDense,
 	}, skN2, nil
 }
 

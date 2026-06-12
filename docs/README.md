@@ -12,12 +12,21 @@ for durable context, harness constraints, and deeper references.
 
 ## Bootstrap Key Reuse
 
+- [A0-A6 unified test standard](bootstrap_key_reuse/a0_a6_test_standard.md)
+- [Original design note](bootstrap_key_reuse/2026_05_28_design.md)
 - [A3 linear-transform schedule interning plan](bootstrap_key_reuse/a3_linear_transform_schedule_interning_plan.md)
 - [A4 encoded-diagonal compatibility sharing plan](bootstrap_key_reuse/a4_encoded_diagonal_compatibility_sharing_plan.md)
 - [A5 verified RNS-slice sharing plan](bootstrap_key_reuse/a5_verified_rns_slice_sharing_plan.md)
 - [A6 superset-output DropLevel view plan](bootstrap_key_reuse/a6_superset_output_drop_level_plan.md)
+- [A7 key-material-pool target evaluator spec](bootstrap_key_reuse/a7_key_material_pool_target_evaluator_spec.md)
+- [A7 key-material-pool target evaluator plan](bootstrap_key_reuse/a7_key_material_pool_target_evaluator_plan.md)
 - [Final target-level reuse spec](bootstrap_key_reuse/final_target_level_reuse_spec.md)
-- [Final target-level reuse implementation plan](bootstrap_key_reuse/final_target_level_reuse_implementation_plan.md)
+- [RNS prefix-only vs target-level planner comparison](bootstrap_key_reuse/prefix_only_vs_planner_comparison.md)
+- [Target-count sweep experiment plan](bootstrap_key_reuse/target_count_sweep_experiment_plan.md)
+- [Research benchmark suite spec](bootstrap_key_reuse/research_benchmark_suite_spec.md)
+- [Research benchmark suite CL test plan](bootstrap_key_reuse/research_benchmark_suite_cl_test_plan.md)
+- [Research benchmark suite report](bootstrap_key_reuse/research_benchmark_suite_report.md)
+- [Toolchain usage](bootstrap_key_reuse/toolchain_usage.md)
 
 ## Project Overview
 
