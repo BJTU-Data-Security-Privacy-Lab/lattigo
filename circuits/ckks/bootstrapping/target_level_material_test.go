@@ -78,6 +78,73 @@ func TestTargetLevelMaterialPlanSelectsSupersetOwnerWhenAllowed(t *testing.T) {
 	}
 }
 
+func TestKeyMaterialPoolPolicyDoesNotCollapseToSingleHighestOwner(t *testing.T) {
+	req := targetLevelMaterialRequestForTest(t, []int{1, 3}, nil, true)
+	req.ReusePolicy = ReuseKeyMaterialPoolTargetEvaluator
+	req.AllowSupersetDrop = true
+
+	plan, err := NewTargetLevelMaterialPlan(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	report := plan.PlanReport()
+	if got, want := report.FutureTargetLevels, []int{1, 3}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("FutureTargetLevels=%v, want %v", got, want)
+	}
+	if got, want := report.OwnerTargetLevels, []int{1, 3}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("OwnerTargetLevels=%v, want %v", got, want)
+	}
+	for _, target := range report.Targets {
+		if target.OwnerLevel != target.TargetLevel {
+			t.Fatalf("target report=%+v, want runtime owner equal target", target)
+		}
+		if target.Strategy != "key_material_pool_target_evaluator" {
+			t.Fatalf("target report=%+v, want key-material-pool strategy", target)
+		}
+	}
+}
+
+func TestA7OwnerHintsDoNotRemoveRuntimeTargets(t *testing.T) {
+	req := targetLevelMaterialRequestForTest(t, []int{1, 3}, []int{3}, true)
+	req.ReusePolicy = ReuseKeyMaterialPoolTargetEvaluator
+	req.AllowSupersetDrop = true
+
+	plan, err := NewTargetLevelMaterialPlan(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	report := plan.PlanReport()
+	if got, want := report.FutureTargetLevels, []int{1, 3}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("FutureTargetLevels=%v, want %v", got, want)
+	}
+	if got, want := report.OwnerTargetLevels, []int{3}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("OwnerTargetLevels=%v, want key-material owner hints %v", got, want)
+	}
+	for _, target := range report.Targets {
+		if target.OwnerLevel != target.TargetLevel {
+			t.Fatalf("target report=%+v, want runtime owner equal target", target)
+		}
+		if target.Strategy != "key_material_pool_target_evaluator" {
+			t.Fatalf("target report=%+v, want key-material-pool strategy", target)
+		}
+	}
+}
+
+func TestA7RejectsUnusedKeyMaterialOwnerHint(t *testing.T) {
+	req := targetLevelMaterialRequestForTest(t, []int{1, 3}, []int{0}, false)
+	req.ReusePolicy = ReuseKeyMaterialPoolTargetEvaluator
+
+	_, err := NewTargetLevelMaterialPlan(req)
+	if !errors.Is(err, ErrTargetLevelUnavailable) {
+		t.Fatalf("NewTargetLevelMaterialPlan error=%v, want ErrTargetLevelUnavailable", err)
+	}
+	if !strings.Contains(err.Error(), "unused_key_material_owner_hint") {
+		t.Fatalf("NewTargetLevelMaterialPlan error=%q, want unused_key_material_owner_hint", err)
+	}
+}
+
 func TestTargetLevelMaterialPlanRejectsSupersetOwnerWhenPolicyDisallowsIt(t *testing.T) {
 	req := targetLevelMaterialRequestForTest(t, []int{1}, []int{3}, true)
 	req.ReusePolicy = ReuseExactOnly
@@ -151,6 +218,50 @@ func TestTargetLevelBootstrapperRejectsInvalidTarget(t *testing.T) {
 	}
 	if _, err := bootstrapper.BootstrapManyAtLevel(nil, 99); !errors.Is(err, ErrInvalidTargetLevel) {
 		t.Fatalf("BootstrapManyAtLevel invalid error=%v, want ErrInvalidTargetLevel", err)
+	}
+}
+
+func TestTargetLevelBootstrapperKeyMaterialPoolUsesDedicatedTargetEvaluator(t *testing.T) {
+	spec := bkrCaseP2MultiFastClustered()
+	req := targetLevelMaterialRequestFromSpecForTest(t, spec, []int{1, 3}, []int{3}, true)
+	req.ReusePolicy = ReuseKeyMaterialPoolTargetEvaluator
+
+	plan, err := NewTargetLevelMaterialPlan(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sk, err := newDeterministicSecretKey(req.FullResidualParameters, spec.Seed+"/a7-runtime/sk")
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys, err := plan.GenReusableEvaluationKeys(sk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool := keys.KeyMaterialPool()
+	beforeCount := pool.PhysicalMaterialCount()
+
+	bootstrapper, err := NewTargetLevelBootstrapper(plan, keys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, targetLevel := range []int{1, 3} {
+		eval, ownerLevel, err := bootstrapper.evaluatorForTarget(targetLevel)
+		if err != nil {
+			t.Fatalf("target %d evaluatorForTarget error=%v", targetLevel, err)
+		}
+		if ownerLevel != targetLevel {
+			t.Fatalf("target %d owner=%d, want exact runtime owner", targetLevel, ownerLevel)
+		}
+		if got := eval.OutputLevel(); got != targetLevel {
+			t.Fatalf("target %d OutputLevel=%d, want %d", targetLevel, got, targetLevel)
+		}
+	}
+	if got := pool.PhysicalMaterialCount(); got != beforeCount {
+		t.Fatalf("PhysicalMaterialCount changed after runtime evaluator construction: got %d want %d", got, beforeCount)
+	}
+	if _, _, err := bootstrapper.evaluatorForTarget(0); !errors.Is(err, ErrTargetLevelUnavailable) {
+		t.Fatalf("undeclared evaluatorForTarget error=%v, want ErrTargetLevelUnavailable", err)
 	}
 }
 
@@ -253,6 +364,72 @@ func TestTargetLevelBootstrapperExactOwnersCoverAllLegalLongTargets(t *testing.T
 				}
 			}
 		})
+	}
+}
+
+func TestKeyMaterialPoolTargetEvaluatorCoversAllLegalFastTargets(t *testing.T) {
+	if bkrRaceDetectorEnabled {
+		t.Skip("A7 all-legal target replay is covered by non-race gates")
+	}
+	spec := bkrCaseP0TinyNativeSingle()
+	levels := legalTargetLevelsForSpecForTest(t, spec)
+	bootstrapper, sk := a7TargetLevelBootstrapperForTest(t, spec, levels, nil)
+	for _, targetLevel := range levels {
+		params, _, err := buildTargetBootstrappingParameters(spec, targetLevel)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ct, values := targetLevelInputCiphertextForTest(t, spec, params, sk, targetLevel)
+		out, err := bootstrapper.BootstrapAtLevel(ct, targetLevel)
+		if err != nil {
+			t.Fatalf("target %d: %v", targetLevel, err)
+		}
+		if _, err := bkrValidateBootstrapKeyReuseOutputs(t, "A7KeyMaterialPoolTargetEvaluator/fast", spec, targetLevel, targetLevel, params, []rlwe.Ciphertext{*out}, [][]complex128{values}); err != nil {
+			t.Fatalf("target %d: %v", targetLevel, err)
+		}
+	}
+}
+
+func TestKeyMaterialPoolTargetEvaluatorBootstrapsTargetZero(t *testing.T) {
+	spec := bkrCaseP0TinyNativeSingle()
+	bootstrapper, sk := a7TargetLevelBootstrapperForTest(t, spec, []int{0}, nil)
+	params, _, err := buildTargetBootstrappingParameters(spec, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ct, values := targetLevelInputCiphertextForTest(t, spec, params, sk, 0)
+	out, err := bootstrapper.BootstrapAtLevel(ct, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := bkrValidateBootstrapKeyReuseOutputs(t, "A7KeyMaterialPoolTargetEvaluator/target-zero", spec, 0, 0, params, []rlwe.Ciphertext{*out}, [][]complex128{values}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestKeyMaterialPoolTargetEvaluatorCoversAllLegalLongTargets(t *testing.T) {
+	if !*flagLongTest {
+		t.Skip("long A7 key-material-pool legal-target replay; rerun with -args -long")
+	}
+	if bkrRaceDetectorEnabled {
+		t.Skip("long A7 all-legal target replay is covered by non-race gates")
+	}
+	spec := bkrCaseP5N16SparseLongSingle()
+	levels := legalTargetLevelsForSpecForTest(t, spec)
+	bootstrapper, sk := a7TargetLevelBootstrapperForTest(t, spec, levels, nil)
+	for _, targetLevel := range levels {
+		params, _, err := buildTargetBootstrappingParameters(spec, targetLevel)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ct, values := targetLevelInputCiphertextForTest(t, spec, params, sk, targetLevel)
+		out, err := bootstrapper.BootstrapAtLevel(ct, targetLevel)
+		if err != nil {
+			t.Fatalf("target %d: %v", targetLevel, err)
+		}
+		if _, err := bkrValidateBootstrapKeyReuseOutputs(t, "A7KeyMaterialPoolTargetEvaluator/long", spec, targetLevel, targetLevel, params, []rlwe.Ciphertext{*out}, [][]complex128{values}); err != nil {
+			t.Fatalf("target %d: %v", targetLevel, err)
+		}
 	}
 }
 
@@ -587,6 +764,56 @@ func TestTargetLevelPlanReportAccountsSupersetSharedView(t *testing.T) {
 			if target.SharedCounts[string(MaterialKindEvaluationKey)] != 1 {
 				t.Fatalf("target 1 shared evaluation keys=%d, want 1", target.SharedCounts[string(MaterialKindEvaluationKey)])
 			}
+		}
+	}
+}
+
+func TestA7PlanReportExplainsSharedAndPrivateKeyMaterial(t *testing.T) {
+	spec := bkrCaseP0TinyNativeSingle()
+	req := targetLevelMaterialRequestFromSpecForTest(t, spec, []int{1}, nil, false)
+	req.ReusePolicy = ReuseKeyMaterialPoolTargetEvaluator
+	plan, err := NewTargetLevelMaterialPlan(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sk, err := newDeterministicSecretKey(req.FullResidualParameters, spec.Seed+"/a7-report/sk")
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys, err := plan.GenReusableEvaluationKeys(sk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bootstrapper, err := NewTargetLevelBootstrapper(plan, keys)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	report := bootstrapper.PlanReport()
+	if got, want := report.KeyMaterialOwnerHintCount, 1; got != want {
+		t.Fatalf("KeyMaterialOwnerHintCount=%d, want %d", got, want)
+	}
+	if got, want := report.ContributingKeyMaterialOwnerCount, 1; got != want {
+		t.Fatalf("ContributingKeyMaterialOwnerCount=%d, want %d", got, want)
+	}
+	if got, want := report.TargetManifestCount, 1; got != want {
+		t.Fatalf("TargetManifestCount=%d, want %d", got, want)
+	}
+	if got, want := report.BootstrapSecretDomainCount, 1; got != want {
+		t.Fatalf("BootstrapSecretDomainCount=%d, want %d", got, want)
+	}
+	if got := report.PhysicalKeyMaterialCount; got == 0 {
+		t.Fatal("PhysicalKeyMaterialCount=0, want >0")
+	}
+	if got := report.PrivateKeyMaterialCount; got == 0 {
+		t.Fatal("PrivateKeyMaterialCount=0, want >0")
+	}
+	if got, want := report.TargetEvaluatorCount, 1; got != want {
+		t.Fatalf("TargetEvaluatorCount=%d, want %d", got, want)
+	}
+	for _, target := range report.Targets {
+		if target.Strategy != "key_material_pool_target_evaluator" {
+			t.Fatalf("target report=%+v, want key_material_pool_target_evaluator", target)
 		}
 	}
 }
@@ -968,6 +1195,30 @@ func targetLevelBootstrapperForTest(t *testing.T, spec bkrCaseSpec, futureTarget
 		t.Fatal(err)
 	}
 
+	return bootstrapper, sk
+}
+
+func a7TargetLevelBootstrapperForTest(t *testing.T, spec bkrCaseSpec, futureTargets, ownerTargets []int) (*TargetLevelBootstrapper, *rlwe.SecretKey) {
+	t.Helper()
+
+	req := targetLevelMaterialRequestFromSpecForTest(t, spec, futureTargets, ownerTargets, false)
+	req.ReusePolicy = ReuseKeyMaterialPoolTargetEvaluator
+	plan, err := NewTargetLevelMaterialPlan(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sk, err := newDeterministicSecretKey(req.FullResidualParameters, spec.Seed+"/secret-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys, err := plan.GenReusableEvaluationKeys(sk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bootstrapper, err := NewTargetLevelBootstrapper(plan, keys)
+	if err != nil {
+		t.Fatal(err)
+	}
 	return bootstrapper, sk
 }
 

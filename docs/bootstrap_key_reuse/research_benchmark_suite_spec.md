@@ -29,6 +29,9 @@
    level 使用 dedicated target evaluator，evaluator construction 从
    manifest-selected `EvaluationKeys` 构造目标 evaluator。DFT matrix、
    linear transformation、matrix schedule 和 encoded diagonal 不属于 A7 复用物料。
+   A7 rows must also expose descriptor-only owner contribution evidence and
+   bootstrap secret-domain counts, so benchmark results can distinguish real
+   key-material sharing from report-only sharing.
 
 非目标：
 
@@ -140,6 +143,7 @@ Prefix-only differential benchmark:
 - target planning：`target_levels`、`owner_target_levels`、`policy`
 - latency：`plan_ms`、`keygen_ms`、`evaluator_construction_ms`、`bootstrap_ms`、`bootstrap_many_ms`、`report_generation_ms`
 - material accounting：`persistent_key_bytes`、`key_material_total_bytes`、`key_material_total_mb`、`shared_key_material_mb`、`private_key_material_mb`、`physical_key_material_count`、`shared_key_material_count`、`private_key_material_count`、`target_evaluator_count`
+- A7 audit：`key_material_owner_hint_count`、`contributing_key_material_owner_count`、`target_manifest_count`、`bootstrap_secret_domain_count`
 - correctness：`output_level_equality`、`output_scale_equality`、`average_log2_precision_real`、`average_log2_precision_imag`、`precision_threshold_bits`
 - environment：`go_version`、`gomaxprocs`、`commit`、`dirty_state`
 
@@ -175,6 +179,12 @@ For A7 rows, the unique physical-object set is the `KeyMaterialPool`. Shared MB
 is the subset referenced by more than one target manifest. Private MB is the
 subset referenced by exactly one target manifest. Shared MB plus private MB
 must equal `key_material_total_mb`.
+
+For A7 rows, `contributing_key_material_owner_count` counts only owner hints
+that contribute at least one physical key material object referenced by a target
+manifest. Logical wrappers, DFT diagnostics, and report-only ownership do not
+count. `bootstrap_secret_domain_count` must equal the number of distinct
+manifest bootstrap secret domains and must never exceed `target_manifest_count`.
 
 Original Lattigo comparison rows must use the same object-level decomposition
 over each independently generated per-target `EvaluationKeys`; repeated key
@@ -224,5 +234,7 @@ because A7 does not pool DFT material.
 | RB8 | profiler lane 混入 baseline | CL plan 将 profiler lane 单独列出 | CL profile section |
 | RB9 | benchmark cache/stale run | CL commands 固定 `-count` 和显式 mode | CL command gates |
 | RB10 | smoke 被误读为完整研究结论 | spec 区分 harness 完成和实验完成 | completion definition |
+| RB11 | owner hint 只在报告中出现，没有真实贡献 key material | A7 rows record contributing owner count from descriptor-only requirements | `contributing_key_material_owner_count` |
+| RB12 | shared/private key material 来自不同 bootstrap secret domains，无法组装有效 evaluator | A7 assembly verifies every manifest key's `BootstrapSecretDomain`; mixed-domain manifests and RNS-prefix views are negative tests; CSV records manifest/domain counts plus correctness | `TestBuildTargetEvaluationKeysRejectsMixedBootstrapSecretDomain`, `TestBuildTargetEvaluationKeysRejectsRNSPrefixView`, `bootstrap_secret_domain_count`, correctness columns |
 
 当前 spec 对上述已知漏洞没有未缓解项。若新增 profile、policy、material kind 或 API surface，必须同步新增 manifest coverage、CSV columns 或 confidence audit item；否则不能声称仍有事实上的 100% 覆盖信心。

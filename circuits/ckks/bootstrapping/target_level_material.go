@@ -10,6 +10,7 @@ import (
 
 	"github.com/tuneinsight/lattigo/v6/circuits/ckks/dft"
 	"github.com/tuneinsight/lattigo/v6/core/rlwe"
+	"github.com/tuneinsight/lattigo/v6/ring"
 	"github.com/tuneinsight/lattigo/v6/ring/ringqp"
 	"github.com/tuneinsight/lattigo/v6/schemes/ckks"
 	"github.com/tuneinsight/lattigo/v6/utils/structs"
@@ -29,6 +30,7 @@ const (
 	ReuseExactOnly ReusePolicy = iota
 	ReuseExactAndPrefix
 	ReuseExactPrefixAndSupersetDrop
+	ReuseKeyMaterialPoolTargetEvaluator
 )
 
 type TargetLevelMaterialRequest struct {
@@ -52,8 +54,9 @@ type TargetLevelMaterialPlan struct {
 }
 
 type ReusableEvaluationKeys struct {
-	plan *TargetLevelMaterialPlan
-	pool *SharedKeyPool
+	plan            *TargetLevelMaterialPlan
+	pool            *SharedKeyPool
+	keyMaterialPool *KeyMaterialPool
 }
 
 type MaterialKind string
@@ -99,16 +102,24 @@ type TargetLevelBootstrapper struct {
 }
 
 type TargetLevelPlanReport struct {
-	PlanID                   string
-	FutureTargetLevels       []int
-	OwnerTargetLevels        []int
-	EnableRNSSliceViews      bool
-	AllowSupersetDrop        bool
-	Targets                  []TargetLevelPlanTargetReport
-	GeneratedPhysicalCounts  map[string]int
-	LogicalViewCounts        map[string]int
-	SharedCounts             map[string]int
-	RejectedCandidateReasons map[string]int
+	PlanID                            string
+	FutureTargetLevels                []int
+	OwnerTargetLevels                 []int
+	EnableRNSSliceViews               bool
+	AllowSupersetDrop                 bool
+	Targets                           []TargetLevelPlanTargetReport
+	GeneratedPhysicalCounts           map[string]int
+	LogicalViewCounts                 map[string]int
+	SharedCounts                      map[string]int
+	RejectedCandidateReasons          map[string]int
+	PhysicalKeyMaterialCount          int
+	SharedKeyMaterialCount            int
+	PrivateKeyMaterialCount           int
+	TargetEvaluatorCount              int
+	KeyMaterialOwnerHintCount         int
+	ContributingKeyMaterialOwnerCount int
+	TargetManifestCount               int
+	BootstrapSecretDomainCount        int
 }
 
 type TargetLevelPlanTargetReport struct {
@@ -176,6 +187,9 @@ func (p *TargetLevelMaterialPlan) GenReusableEvaluationKeys(sk *rlwe.SecretKey) 
 	if sk == nil {
 		return nil, fmt.Errorf("%w: secret key is nil", ErrMissingReusableMaterial)
 	}
+	if p.req.ReusePolicy == ReuseKeyMaterialPoolTargetEvaluator {
+		return p.genReusableKeyMaterialPoolEvaluationKeys(sk)
+	}
 
 	keysByOwner := make(map[int]*EvaluationKeys, len(p.ownerTargetLevels))
 	materialIDs := make([]MaterialID, 0, len(p.ownerTargetLevels))
@@ -217,11 +231,80 @@ func (p *TargetLevelMaterialPlan) GenReusableEvaluationKeys(sk *rlwe.SecretKey) 
 	}, nil
 }
 
+func (p *TargetLevelMaterialPlan) genReusableKeyMaterialPoolEvaluationKeys(sk *rlwe.SecretKey) (*ReusableEvaluationKeys, error) {
+	keysByTarget := make(map[int]*EvaluationKeys, len(p.futureTargetLevels))
+	materialIDs := make([]MaterialID, 0, len(p.futureTargetLevels))
+	keyMaterialPool := NewKeyMaterialPool()
+
+	for _, targetLevel := range p.futureTargetLevels {
+		btpParams, ok := p.paramsByTargetLevel[targetLevel]
+		if !ok {
+			return nil, fmt.Errorf("%w: target level %d has no parameters", ErrMissingReusableMaterial, targetLevel)
+		}
+
+		targetSK, err := secretKeyForResidualParameters(sk, btpParams.ResidualParameters)
+		if err != nil {
+			return nil, err
+		}
+
+		keys, ephemeralSK, err := btpParams.GenEvaluationKeys(targetSK)
+		if err != nil {
+			return nil, fmt.Errorf("cannot generate key-material-pool evaluation keys for target level %d: %w", targetLevel, err)
+		}
+		keysByTarget[targetLevel] = keys
+		materialIDs = append(materialIDs, keyMaterialIDs(targetLevel, btpParams, keys, targetSK, ephemeralSK)...)
+		if err := addEvaluationKeysToKeyMaterialPool(keyMaterialPool, targetLevel, targetLevel, btpParams, keys, targetSK, ephemeralSK); err != nil {
+			return nil, err
+		}
+		domain := NewBootstrapSecretDomainDescriptor(targetLevel, btpParams)
+		if err := keyMaterialPool.SetManifestBootstrapSecretDomain(targetLevel, targetLevel, domain.SecretDomain); err != nil {
+			return nil, err
+		}
+	}
+
+	return &ReusableEvaluationKeys{
+		plan:            p,
+		keyMaterialPool: keyMaterialPool,
+		pool: &SharedKeyPool{
+			ownerTargetLevels: append([]int(nil), p.futureTargetLevels...),
+			evaluationKeys:    keysByTarget,
+			materialIDs:       materialIDs,
+		},
+	}, nil
+}
+
 func (k *ReusableEvaluationKeys) SharedKeyPool() *SharedKeyPool {
 	if k == nil {
 		return nil
 	}
 	return k.pool
+}
+
+func (k *ReusableEvaluationKeys) KeyMaterialPool() *KeyMaterialPool {
+	if k == nil {
+		return nil
+	}
+	return k.keyMaterialPool
+}
+
+func (p *TargetLevelMaterialPlan) KeyMaterialRequirements() []TargetKeyMaterialRequirement {
+	if p == nil {
+		return nil
+	}
+	requirements := []TargetKeyMaterialRequirement{}
+	for _, targetLevel := range p.futureTargetLevels {
+		params, ok := p.paramsByTargetLevel[targetLevel]
+		if !ok {
+			continue
+		}
+		ownerLevel := p.ownerByTargetLevel[targetLevel]
+		if p.req.ReusePolicy == ReuseKeyMaterialPoolTargetEvaluator {
+			ownerLevel = targetLevel
+		}
+		domain := NewBootstrapSecretDomainDescriptor(ownerLevel, params)
+		requirements = append(requirements, keyMaterialRequirementsForTarget(targetLevel, ownerLevel, params, domain)...)
+	}
+	return requirements
 }
 
 func (p *SharedKeyPool) OwnerTargetLevels() []int {
@@ -271,6 +354,9 @@ func NewTargetLevelBootstrapper(plan *TargetLevelMaterialPlan, keys *ReusableEva
 	if keys.plan != plan {
 		return nil, fmt.Errorf("%w: reusable evaluation keys were generated for a different plan", ErrIncompatibleReusableMaterial)
 	}
+	if plan.req.ReusePolicy == ReuseKeyMaterialPoolTargetEvaluator {
+		return newKeyMaterialPoolTargetLevelBootstrapper(plan, keys)
+	}
 
 	evaluators := make(map[int]*Evaluator, len(plan.ownerTargetLevels))
 	for _, ownerLevel := range plan.ownerTargetLevels {
@@ -310,6 +396,26 @@ func NewTargetLevelBootstrapper(plan *TargetLevelMaterialPlan, keys *ReusableEva
 		keys:             keys,
 		evaluators:       evaluators,
 		prefixEvaluators: prefixEvaluators,
+	}, nil
+}
+
+func newKeyMaterialPoolTargetLevelBootstrapper(plan *TargetLevelMaterialPlan, keys *ReusableEvaluationKeys) (*TargetLevelBootstrapper, error) {
+	pool := keys.KeyMaterialPool()
+	if pool == nil {
+		return nil, fmt.Errorf("%w: key material pool is nil", ErrMissingReusableMaterial)
+	}
+	evaluators := make(map[int]*Evaluator, len(plan.futureTargetLevels))
+	for _, targetLevel := range plan.futureTargetLevels {
+		eval, err := plan.BuildTargetEvaluator(pool, targetLevel)
+		if err != nil {
+			return nil, fmt.Errorf("cannot create key-material-pool target evaluator for level %d: %w", targetLevel, err)
+		}
+		evaluators[targetLevel] = eval
+	}
+	return &TargetLevelBootstrapper{
+		plan:       plan,
+		keys:       keys,
+		evaluators: evaluators,
 	}, nil
 }
 
@@ -358,6 +464,10 @@ func (b *TargetLevelBootstrapper) PlanReport() TargetLevelPlanReport {
 		return TargetLevelPlanReport{}
 	}
 	report := b.plan.planReport(b.keys.pool)
+	if b.plan.req.ReusePolicy == ReuseKeyMaterialPoolTargetEvaluator {
+		b.augmentKeyMaterialPoolPlanReport(&report)
+		return report
+	}
 	for i := range report.Targets {
 		targetLevel := report.Targets[i].TargetLevel
 		ownerLevel := report.Targets[i].OwnerLevel
@@ -367,6 +477,39 @@ func (b *TargetLevelBootstrapper) PlanReport() TargetLevelPlanReport {
 		}
 	}
 	return report
+}
+
+func (b *TargetLevelBootstrapper) augmentKeyMaterialPoolPlanReport(report *TargetLevelPlanReport) {
+	if b == nil || report == nil || b.keys == nil {
+		return
+	}
+	pool := b.keys.KeyMaterialPool()
+	if pool == nil {
+		return
+	}
+	report.PhysicalKeyMaterialCount = pool.PhysicalMaterialCount()
+	report.SharedKeyMaterialCount = pool.SharedMaterialCount()
+	report.PrivateKeyMaterialCount = pool.PrivateMaterialCount()
+	report.TargetEvaluatorCount = len(b.evaluators)
+	report.KeyMaterialOwnerHintCount = len(b.plan.ownerTargetLevels)
+	report.TargetManifestCount = len(pool.manifests)
+	report.ContributingKeyMaterialOwnerCount = contributingKeyMaterialOwnerCount(pool, b.plan.ownerTargetLevels)
+	report.BootstrapSecretDomainCount = bootstrapSecretDomainCount(pool)
+	report.GeneratedPhysicalCounts = keyMaterialGeneratedPhysicalCounts(pool)
+	report.SharedCounts = map[string]int{}
+	for _, target := range b.plan.futureTargetLevels {
+		for i := range report.Targets {
+			if report.Targets[i].TargetLevel != target {
+				continue
+			}
+			report.Targets[i].OwnerLevel = target
+			report.Targets[i].Strategy = "key_material_pool_target_evaluator"
+			report.Targets[i].ReasonCode = "none"
+			report.Targets[i].GeneratedPhysicalCounts = keyMaterialGeneratedPhysicalCountsForTarget(pool, target)
+			report.Targets[i].SharedCounts = keyMaterialSharedCountsForTarget(pool, target)
+			break
+		}
+	}
 }
 
 func (b *TargetLevelBootstrapper) evaluatorForTarget(targetLevel int) (*Evaluator, int, error) {
@@ -477,6 +620,73 @@ func generatedPhysicalCountsForPool(pool *SharedKeyPool, ownerLevels []int) map[
 	return counts
 }
 
+func keyMaterialGeneratedPhysicalCounts(pool *KeyMaterialPool) map[string]int {
+	counts := map[string]int{}
+	if pool == nil {
+		return counts
+	}
+	for _, object := range pool.objects {
+		counts[string(object.Key.Kind)]++
+	}
+	return counts
+}
+
+func keyMaterialGeneratedPhysicalCountsForTarget(pool *KeyMaterialPool, targetLevel int) map[string]int {
+	counts := map[string]int{}
+	if pool == nil {
+		return counts
+	}
+	for _, object := range pool.objects {
+		if intSliceContains(object.Targets, targetLevel) {
+			counts[string(object.Key.Kind)]++
+		}
+	}
+	return counts
+}
+
+func keyMaterialSharedCountsForTarget(pool *KeyMaterialPool, targetLevel int) map[string]int {
+	counts := map[string]int{}
+	if pool == nil {
+		return counts
+	}
+	for _, object := range pool.objects {
+		if len(object.Targets) > 1 && intSliceContains(object.Targets, targetLevel) {
+			counts[string(object.Key.Kind)]++
+		}
+	}
+	return counts
+}
+
+func contributingKeyMaterialOwnerCount(pool *KeyMaterialPool, ownerHints []int) int {
+	if pool == nil {
+		return 0
+	}
+	ownerHintSet := make(map[int]struct{}, len(ownerHints))
+	for _, owner := range ownerHints {
+		ownerHintSet[owner] = struct{}{}
+	}
+	contributing := map[int]struct{}{}
+	for _, object := range pool.objects {
+		if _, ok := ownerHintSet[object.Owner]; ok {
+			contributing[object.Owner] = struct{}{}
+		}
+	}
+	return len(contributing)
+}
+
+func bootstrapSecretDomainCount(pool *KeyMaterialPool) int {
+	if pool == nil {
+		return 0
+	}
+	domains := map[string]struct{}{}
+	for _, manifest := range pool.manifests {
+		if manifest.BootstrapSecretDomain != "" {
+			domains[manifest.BootstrapSecretDomain] = struct{}{}
+		}
+	}
+	return len(domains)
+}
+
 func generatedPhysicalCountsForOwner(pool *SharedKeyPool, ownerLevel int) map[string]int {
 	if pool == nil {
 		return map[string]int{string(MaterialKindEvaluationKey): 1}
@@ -501,6 +711,15 @@ func cloneCounts(src map[string]int) map[string]int {
 	dst := map[string]int{}
 	addCounts(dst, src)
 	return dst
+}
+
+func intSliceContains(values []int, want int) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 func logicalMaterialIDsForTarget(pool *SharedKeyPool, targetLevel int) []MaterialID {
@@ -735,6 +954,10 @@ func canonicalOwnerTargetLevels(req TargetLevelMaterialRequest, futureTargets []
 }
 
 func selectOwnerTargets(req TargetLevelMaterialRequest, futureTargets, ownerTargets []int, paramsByTarget map[int]Parameters) (map[int]int, map[int]string, map[int]map[string]int, error) {
+	if req.ReusePolicy == ReuseKeyMaterialPoolTargetEvaluator {
+		return selectKeyMaterialPoolTargetOwners(futureTargets, ownerTargets)
+	}
+
 	ownerSet := make(map[int]struct{}, len(ownerTargets))
 	for _, ownerLevel := range ownerTargets {
 		ownerSet[ownerLevel] = struct{}{}
@@ -758,6 +981,28 @@ func selectOwnerTargets(req TargetLevelMaterialRequest, futureTargets, ownerTarg
 		if !servedByOwner[ownerLevel] {
 			return nil, nil, nil, fmt.Errorf("%w: owner target level %d serves no future target", ErrTargetLevelUnavailable, ownerLevel)
 		}
+	}
+
+	return ownerByTarget, strategyByTarget, rejectedReasons, nil
+}
+
+func selectKeyMaterialPoolTargetOwners(futureTargets, ownerTargets []int) (map[int]int, map[int]string, map[int]map[string]int, error) {
+	futureSet := make(map[int]struct{}, len(futureTargets))
+	ownerByTarget := make(map[int]int, len(futureTargets))
+	strategyByTarget := make(map[int]string, len(futureTargets))
+	rejectedReasons := make(map[int]map[string]int, len(futureTargets))
+
+	for _, targetLevel := range futureTargets {
+		futureSet[targetLevel] = struct{}{}
+		ownerByTarget[targetLevel] = targetLevel
+		strategyByTarget[targetLevel] = "key_material_pool_target_evaluator"
+	}
+
+	for _, ownerLevel := range ownerTargets {
+		if _, ok := futureSet[ownerLevel]; ok {
+			continue
+		}
+		return nil, nil, nil, fmt.Errorf("%w: owner target level %d rejected: unused_key_material_owner_hint", ErrTargetLevelUnavailable, ownerLevel)
 	}
 
 	return ownerByTarget, strategyByTarget, rejectedReasons, nil
@@ -1054,6 +1299,234 @@ func rnsPrefixPolyQPView(poly ringqp.Poly, levelQ, levelP int) ringqp.Poly {
 	out := poly
 	out.Resize(levelQ, levelP)
 	return out
+}
+
+func keyMaterialRequirementsForTarget(targetLevel, ownerLevel int, params Parameters, domain BootstrapSecretDomain) []TargetKeyMaterialRequirement {
+	paramHash := targetLevelParametersHash(params)
+	levelQ := params.BootstrappingParameters.MaxLevel()
+	levelP := params.BootstrappingParameters.MaxLevelP()
+	requirements := []TargetKeyMaterialRequirement{
+		{
+			TargetLevel:           targetLevel,
+			CandidateOwnerLevel:   ownerLevel,
+			BootstrapSecretDomain: domain.SecretDomain,
+			Key: KeyMaterialKey{
+				Kind:                  KeyMaterialKindRelinearization,
+				LevelQ:                levelQ,
+				LevelP:                levelP,
+				ParametersHash:        paramHash,
+				BootstrapSecretDomain: domain.SecretDomain,
+				SecretDomain:          domain.SecretDomain,
+				DescriptorHash:        hashStrings("key-material-requirement", "relinearization", paramHash, domain.SecretDomain, strconv.Itoa(levelQ), strconv.Itoa(levelP)),
+			},
+			Shareable: true,
+		},
+	}
+
+	galEls := append([]uint64(nil), params.GaloisElements(params.BootstrappingParameters)...)
+	galEls = append(galEls, params.BootstrappingParameters.GaloisElementForComplexConjugation())
+	for _, galEl := range sortedUniqueUint64s(galEls) {
+		requirements = append(requirements, TargetKeyMaterialRequirement{
+			TargetLevel:           targetLevel,
+			CandidateOwnerLevel:   ownerLevel,
+			BootstrapSecretDomain: domain.SecretDomain,
+			Key: KeyMaterialKey{
+				Kind:                  KeyMaterialKindRotation,
+				LevelQ:                levelQ,
+				LevelP:                levelP,
+				ParametersHash:        paramHash,
+				BootstrapSecretDomain: domain.SecretDomain,
+				SecretDomain:          domain.SecretDomain,
+				GaloisElement:         galEl,
+				DescriptorHash:        hashStrings("key-material-requirement", "rotation", paramHash, domain.SecretDomain, strconv.FormatUint(galEl, 10), strconv.Itoa(levelQ), strconv.Itoa(levelP)),
+			},
+			Shareable: true,
+		})
+	}
+
+	if params.ResidualParameters.N() != params.BootstrappingParameters.N() {
+		if params.ResidualParameters.RingType() == ring.ConjugateInvariant {
+			requirements = append(requirements,
+				switchKeyMaterialRequirement(targetLevel, ownerLevel, params, domain, "RealToCmplx"),
+				switchKeyMaterialRequirement(targetLevel, ownerLevel, params, domain, "CmplxToReal"),
+			)
+		} else {
+			requirements = append(requirements,
+				switchKeyMaterialRequirement(targetLevel, ownerLevel, params, domain, "N1ToN2"),
+				switchKeyMaterialRequirement(targetLevel, ownerLevel, params, domain, "N2ToN1"),
+			)
+		}
+	}
+
+	if params.EphemeralSecretWeight != 0 {
+		requirements = append(requirements,
+			denseSparseKeyMaterialRequirement(targetLevel, ownerLevel, params, domain, "DenseToSparse"),
+			denseSparseKeyMaterialRequirement(targetLevel, ownerLevel, params, domain, "SparseToDense"),
+		)
+	}
+
+	return requirements
+}
+
+func switchKeyMaterialRequirement(targetLevel, ownerLevel int, params Parameters, domain BootstrapSecretDomain, direction string) TargetKeyMaterialRequirement {
+	paramHash := targetLevelParametersHash(params)
+	levelQ := params.BootstrappingParameters.MaxLevel()
+	levelP := params.BootstrappingParameters.MaxLevelP()
+	secretDomain := hashStrings("key-material-requirement", "ring-switch-secret-domain", direction, paramHash, domain.SecretDomain, strconv.Itoa(targetLevel))
+	return TargetKeyMaterialRequirement{
+		TargetLevel:           targetLevel,
+		CandidateOwnerLevel:   ownerLevel,
+		BootstrapSecretDomain: domain.SecretDomain,
+		Key: KeyMaterialKey{
+			Kind:                  KeyMaterialKindRingSwitch,
+			LevelQ:                levelQ,
+			LevelP:                levelP,
+			ParametersHash:        paramHash,
+			BootstrapSecretDomain: domain.SecretDomain,
+			SecretDomain:          secretDomain,
+			Direction:             direction,
+			DescriptorHash:        hashStrings("key-material-requirement", "ring-switch", direction, paramHash, secretDomain, strconv.Itoa(levelQ), strconv.Itoa(levelP)),
+		},
+		Shareable: false,
+	}
+}
+
+func denseSparseKeyMaterialRequirement(targetLevel, ownerLevel int, params Parameters, domain BootstrapSecretDomain, direction string) TargetKeyMaterialRequirement {
+	paramHash := targetLevelParametersHash(params)
+	levelQ := params.BootstrappingParameters.MaxLevel()
+	levelP := params.BootstrappingParameters.MaxLevelP()
+	secretDomain := hashStrings("key-material-requirement", "dense-sparse-secret-domain", direction, paramHash, domain.SecretDomain, strconv.Itoa(params.EphemeralSecretWeight))
+	return TargetKeyMaterialRequirement{
+		TargetLevel:           targetLevel,
+		CandidateOwnerLevel:   ownerLevel,
+		BootstrapSecretDomain: domain.SecretDomain,
+		Key: KeyMaterialKey{
+			Kind:                  KeyMaterialKindDenseSparse,
+			LevelQ:                levelQ,
+			LevelP:                levelP,
+			ParametersHash:        paramHash,
+			BootstrapSecretDomain: domain.SecretDomain,
+			SecretDomain:          secretDomain,
+			Direction:             direction,
+			DescriptorHash:        hashStrings("key-material-requirement", "dense-sparse", direction, paramHash, secretDomain, strconv.Itoa(levelQ), strconv.Itoa(levelP)),
+		},
+		Shareable: false,
+	}
+}
+
+func addEvaluationKeysToKeyMaterialPool(pool *KeyMaterialPool, ownerLevel, targetLevel int, params Parameters, keys *EvaluationKeys, inputSK, ephemeralSK *rlwe.SecretKey) error {
+	bootstrapDomain := NewBootstrapSecretDomainDescriptor(ownerLevel, params)
+	for _, id := range keyMaterialIDs(ownerLevel, params, keys, inputSK, ephemeralSK) {
+		keyKind, ok := keyMaterialKindFromMaterialKind(id.Kind)
+		if !ok {
+			continue
+		}
+		value, binaryLen, err := keyMaterialValueForID(keys, id)
+		if err != nil {
+			return err
+		}
+		key := KeyMaterialKey{
+			Kind:                  keyKind,
+			LevelQ:                id.LevelQ,
+			LevelP:                id.LevelP,
+			ParametersHash:        id.ParametersHash,
+			BootstrapSecretDomain: bootstrapDomain.SecretDomain,
+			SecretDomain:          id.SecretDomain,
+			GaloisElement:         id.GaloisElement,
+			Direction:             id.Direction,
+			DescriptorHash:        id.DescriptorHash,
+		}
+		if key.Kind == KeyMaterialKindRelinearization || key.Kind == KeyMaterialKindRotation {
+			key.SecretDomain = bootstrapDomain.SecretDomain
+			key.DescriptorHash = hashStrings("key-material-physical", string(key.Kind), key.ParametersHash, key.SecretDomain, strconv.FormatUint(key.GaloisElement, 10), id.DescriptorHash)
+		}
+		if err := pool.Add(ownerLevel, []int{targetLevel}, key, KeyMaterialViewPhysical, value, binaryLen); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func keyMaterialKindFromMaterialKind(kind MaterialKind) (KeyMaterialKind, bool) {
+	switch kind {
+	case MaterialKindRelinearizationKey:
+		return KeyMaterialKindRelinearization, true
+	case MaterialKindRotationKey:
+		return KeyMaterialKindRotation, true
+	case MaterialKindRingSwitchKey:
+		return KeyMaterialKindRingSwitch, true
+	case MaterialKindDenseSparseKey:
+		return KeyMaterialKindDenseSparse, true
+	default:
+		return "", false
+	}
+}
+
+func keyMaterialValueForID(keys *EvaluationKeys, id MaterialID) (any, int, error) {
+	if keys == nil {
+		return nil, 0, fmt.Errorf("%w: evaluation keys are nil", ErrMissingReusableMaterial)
+	}
+	switch id.Kind {
+	case MaterialKindRelinearizationKey:
+		rlk, err := keys.GetRelinearizationKey()
+		if err != nil {
+			return nil, 0, err
+		}
+		return rlk, rlk.BinarySize(), nil
+	case MaterialKindRotationKey:
+		gk, err := keys.GetGaloisKey(id.GaloisElement)
+		if err != nil {
+			return nil, 0, err
+		}
+		return gk, gk.BinarySize(), nil
+	case MaterialKindRingSwitchKey, MaterialKindDenseSparseKey:
+		evk, err := evaluationKeyByDirection(keys, id.Direction)
+		if err != nil {
+			return nil, 0, err
+		}
+		return evk, evk.BinarySize(), nil
+	default:
+		return nil, 0, fmt.Errorf("%w: unsupported material id kind %q", ErrIncompatibleReusableMaterial, id.Kind)
+	}
+}
+
+func evaluationKeyByDirection(keys *EvaluationKeys, direction string) (*rlwe.EvaluationKey, error) {
+	if keys == nil {
+		return nil, fmt.Errorf("%w: evaluation keys are nil", ErrMissingReusableMaterial)
+	}
+	var evk *rlwe.EvaluationKey
+	switch direction {
+	case "N1ToN2":
+		evk = keys.EvkN1ToN2
+	case "N2ToN1":
+		evk = keys.EvkN2ToN1
+	case "RealToCmplx":
+		evk = keys.EvkRealToCmplx
+	case "CmplxToReal":
+		evk = keys.EvkCmplxToReal
+	case "DenseToSparse":
+		evk = keys.EvkDenseToSparse
+	case "SparseToDense":
+		evk = keys.EvkSparseToDense
+	default:
+		return nil, fmt.Errorf("%w: unknown evaluation-key direction %q", ErrIncompatibleReusableMaterial, direction)
+	}
+	if evk == nil {
+		return nil, fmt.Errorf("%w: evaluation key direction %q is nil", ErrMissingReusableMaterial, direction)
+	}
+	return evk, nil
+}
+
+func sortedUniqueUint64s(values []uint64) []uint64 {
+	out := append([]uint64(nil), values...)
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	unique := out[:0]
+	for _, value := range out {
+		if len(unique) == 0 || unique[len(unique)-1] != value {
+			unique = append(unique, value)
+		}
+	}
+	return append([]uint64(nil), unique...)
 }
 
 func keyMaterialIDs(ownerLevel int, params Parameters, keys *EvaluationKeys, inputSK, ephemeralSK *rlwe.SecretKey) []MaterialID {

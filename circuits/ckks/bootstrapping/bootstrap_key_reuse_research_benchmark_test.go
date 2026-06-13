@@ -3,6 +3,7 @@ package bootstrapping
 import (
 	"encoding/csv"
 	"errors"
+	"math"
 	"os"
 	"path/filepath"
 	"slices"
@@ -273,13 +274,22 @@ func TestTargetCountSweepCSVHeaderIsStable(t *testing.T) {
 		"target_count_label",
 		"target_levels",
 		"scheme",
-		"material_total_mb",
+		"key_material_total_bytes",
+		"key_material_total_mb",
+		"shared_key_material_mb",
+		"private_key_material_mb",
 		"key_preparation_time_s",
 		"total_bootstrap_time_s",
 		"mean_bootstrap_latency_ms",
 		"owner_target_levels",
 		"physical_material_count",
 		"shared_material_count",
+		"private_key_material_count",
+		"target_evaluator_count",
+		"key_material_owner_hint_count",
+		"contributing_key_material_owner_count",
+		"target_manifest_count",
+		"bootstrap_secret_domain_count",
 		"correctness_pass",
 		"go_version",
 		"gomaxprocs",
@@ -319,16 +329,26 @@ func TestTargetCountSweepSmokeReportWritesOriginalAndPlannerRows(t *testing.T) {
 
 	header := records[0]
 	schemeCol := slices.Index(header, "scheme")
-	materialCol := slices.Index(header, "material_total_mb")
+	materialBytesCol := slices.Index(header, "key_material_total_bytes")
+	materialCol := slices.Index(header, "key_material_total_mb")
+	sharedMaterialCol := slices.Index(header, "shared_key_material_mb")
+	privateMaterialCol := slices.Index(header, "private_key_material_mb")
 	keyPrepCol := slices.Index(header, "key_preparation_time_s")
 	bootstrapCol := slices.Index(header, "total_bootstrap_time_s")
-	if schemeCol < 0 || materialCol < 0 || keyPrepCol < 0 || bootstrapCol < 0 {
+	if schemeCol < 0 || materialBytesCol < 0 || materialCol < 0 || sharedMaterialCol < 0 || privateMaterialCol < 0 || keyPrepCol < 0 || bootstrapCol < 0 {
 		t.Fatalf("CSV header missing table columns: %v", header)
 	}
 
 	seen := map[string]bool{}
 	for _, record := range records[1:] {
 		seen[record[schemeCol]] = true
+		materialBytes, err := strconv.ParseInt(record[materialBytesCol], 10, 64)
+		if err != nil {
+			t.Fatalf("cannot parse %s in row %v: %v", header[materialBytesCol], record, err)
+		}
+		if materialBytes <= 0 {
+			t.Fatalf("%s=%d, want >0 in row %v", header[materialBytesCol], materialBytes, record)
+		}
 		for _, col := range []int{materialCol, keyPrepCol, bootstrapCol} {
 			value, err := strconv.ParseFloat(record[col], 64)
 			if err != nil {
@@ -338,8 +358,20 @@ func TestTargetCountSweepSmokeReportWritesOriginalAndPlannerRows(t *testing.T) {
 				t.Fatalf("%s=%f, want >0 in row %v", header[col], value, record)
 			}
 		}
+		totalMB, _ := strconv.ParseFloat(record[materialCol], 64)
+		sharedMB, err := strconv.ParseFloat(record[sharedMaterialCol], 64)
+		if err != nil {
+			t.Fatalf("cannot parse %s in row %v: %v", header[sharedMaterialCol], record, err)
+		}
+		privateMB, err := strconv.ParseFloat(record[privateMaterialCol], 64)
+		if err != nil {
+			t.Fatalf("cannot parse %s in row %v: %v", header[privateMaterialCol], record, err)
+		}
+		if delta := math.Abs(totalMB - sharedMB - privateMB); delta > 1e-6 {
+			t.Fatalf("material MB formula mismatch total=%f shared=%f private=%f row=%v", totalMB, sharedMB, privateMB, record)
+		}
 	}
-	for _, scheme := range []string{"original_lattigo", "ours_reusable_planner"} {
+	for _, scheme := range []string{"original_lattigo", "ours_key_material_pool_target_evaluator"} {
 		if !seen[scheme] {
 			t.Fatalf("missing scheme %s in target-count sweep CSV rows", scheme)
 		}

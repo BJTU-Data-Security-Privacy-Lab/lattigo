@@ -15,16 +15,23 @@ boundary for the final method.
 A7 must satisfy all requirements below:
 
 1. The caller declares the complete set of future bootstrap target levels.
-2. Preparation generates the key material required by those target levels.
-3. Physically identical key material across target levels is generated once.
-4. Target-specific key material is generated separately and attached only to
+2. Preparation first builds descriptor-only key-material requirements for those
+   target levels.
+3. Owner hints that contribute no physical key material are rejected before
+   key generation.
+4. Preparation generates the key material required by those target levels.
+5. Physically identical key material across target levels is generated once.
+6. Target-specific key material is generated separately and attached only to
    that target manifest.
-5. Runtime `BootstrapAtLevel(ct, r)` uses an evaluator built for target level
+7. Every target manifest is assembled around one bootstrap secret domain; shared
+   core keys and target-private switch keys in that manifest must reference that
+   same domain.
+8. Runtime `BootstrapAtLevel(ct, r)` uses an evaluator built for target level
    `r`.
-6. The target evaluator uses `targetLevelParameters(r)`.
-7. The returned ciphertext has `Level() == r`.
-8. Runtime bootstrap never generates keys or mutates physical key material.
-9. Superset-output `DropLevel` remains available only as an explicit fallback
+9. The target evaluator uses `targetLevelParameters(r)`.
+10. The returned ciphertext has `Level() == r`.
+11. Runtime bootstrap never generates keys or mutates physical key material.
+12. Superset-output `DropLevel` remains available only as an explicit fallback
    policy and is not reported as the A7 final method.
 
 ## 2. Non-Goals
@@ -74,8 +81,10 @@ Required semantics:
    cannot remove any declared runtime target evaluator.
 5. Every non-empty `OwnerTargetLevels` entry must be legal and must contribute
    at least one physical key material object to at least one declared target
-   manifest. If an owner hint contributes nothing, planning must reject it with
-   an explicit reason such as `unused_key_material_owner_hint`.
+   manifest. Contribution is decided by the descriptor-only requirement plan,
+   before physical key generation. If an owner hint contributes nothing,
+   planning must reject it with an explicit reason such as
+   `unused_key_material_owner_hint`.
 6. Runtime evaluator ownership is always exact:
    `runtimeOwner(targetLevel) == targetLevel`.
 7. Reports must expose key-material owner hints separately from runtime target
@@ -89,7 +98,46 @@ Required semantics:
 
 ## 4. Key Material Model
 
-### 4.1 KeyMaterialKey
+### 4.1 Bootstrap Secret Domains
+
+A7 may reuse key material only inside a coherent bootstrap secret domain.
+
+For each key-material owner level, preparation creates or derives one owner
+bootstrap secret domain:
+
+```go
+type BootstrapSecretDomain struct {
+	OwnerLevel     int
+	ParametersHash string
+	SecretDomain   string
+}
+```
+
+The owner domain is a stable logical descriptor, not a hash of generated secret
+bytes. Descriptor-only planning may derive it from owner level, parameter hash,
+and plan-local identity before physical key generation. Physical key generation
+then creates or derives the actual bootstrap secret once and binds it to that
+descriptor.
+
+The owner domain identifies the bootstrap secret used for relinearization,
+rotation, ring/domain switch, and dense/sparse key material. A target manifest
+must select exactly one bootstrap secret domain descriptor. All keys in that
+manifest must be compatible with that domain:
+
+1. shared relinearization and rotation keys are generated under that owner
+   bootstrap secret domain;
+2. target-private ring/domain switch keys switch between the target residual
+   secret domain and the selected owner bootstrap secret domain;
+3. target-private dense/sparse keys switch between the selected owner bootstrap
+   secret domain and its sparse-domain counterpart;
+4. the manifest must not mix key material generated for different bootstrap
+   secret domains.
+
+If the planner cannot assemble all required key material for a target under one
+bootstrap secret domain, planning must fail before runtime evaluator
+construction.
+
+### 4.2 KeyMaterialKey
 
 A7 uses structured key material identity. Two pieces of key material can be
 physically shared only when their identity is compatible for that key kind.
@@ -105,14 +153,15 @@ const (
 )
 
 type KeyMaterialKey struct {
-	Kind           KeyMaterialKind
-	LevelQ         int
-	LevelP         int
-	ParametersHash string
-	SecretDomain   string
-	GaloisElement  uint64
-	Direction      string
-	DescriptorHash string
+	Kind                  KeyMaterialKind
+	LevelQ                int
+	LevelP                int
+	ParametersHash        string
+	BootstrapSecretDomain string
+	SecretDomain          string
+	GaloisElement         uint64
+	Direction             string
+	DescriptorHash        string
 }
 ```
 
@@ -120,10 +169,10 @@ Required discriminators:
 
 | Kind | Required discriminators |
 | --- | --- |
-| `relinearization_key` | `LevelQ`, `LevelP`, `ParametersHash`, `SecretDomain`, decomposition descriptor in `DescriptorHash` |
+| `relinearization_key` | `LevelQ`, `LevelP`, `ParametersHash`, `BootstrapSecretDomain`, `SecretDomain`, decomposition descriptor in `DescriptorHash` |
 | `rotation_key` | all relinearization fields plus `GaloisElement` |
-| `ring_switch_key` | all relinearization fields plus `Direction` and source/destination secret domains encoded in `SecretDomain` |
-| `dense_sparse_key` | all relinearization fields plus `Direction` and dense/sparse secret domains encoded in `SecretDomain` |
+| `ring_switch_key` | `LevelQ`, `LevelP`, `ParametersHash`, `BootstrapSecretDomain`, `Direction`, and source/destination secret domains encoded in `SecretDomain` |
+| `dense_sparse_key` | `LevelQ`, `LevelP`, `ParametersHash`, `BootstrapSecretDomain`, `Direction`, and dense/sparse secret domains encoded in `SecretDomain` |
 
 The following are out of scope for A7 key material identity:
 
@@ -133,7 +182,7 @@ The following are out of scope for A7 key material identity:
 4. DFT matrix descriptor.
 5. Encoded polynomial descriptor.
 
-### 4.2 KeyMaterialPool
+### 4.3 KeyMaterialPool
 
 `KeyMaterialPool` owns physical key material and target key manifests:
 
@@ -157,9 +206,11 @@ type KeyMaterialObject struct {
 }
 
 type TargetKeyMaterialManifest struct {
-	TargetLevel int
-	Shared      []KeyMaterialKey
-	Private     []KeyMaterialKey
+	TargetLevel           int
+	KeyMaterialOwnerLevel int
+	BootstrapSecretDomain string
+	Shared                []KeyMaterialKey
+	Private               []KeyMaterialKey
 }
 
 type KeyMaterialPool struct {
@@ -179,7 +230,41 @@ The pool must not store or require executable DFT material. Target evaluators
 may generate `C2SDFTMatrix` and `S2CDFTMatrix` through the existing
 `NewEvaluator` path.
 
-### 4.3 Target Manifest
+### 4.4 Descriptor-Only Requirement Plan
+
+Before key generation, A7 builds descriptor-only requirements for every declared
+target and every candidate key-material owner:
+
+```go
+type TargetKeyMaterialRequirement struct {
+	TargetLevel           int
+	CandidateOwnerLevel   int
+	BootstrapSecretDomain string
+	Key                   KeyMaterialKey
+	Shareable             bool
+}
+```
+
+This phase must not allocate or generate RLWE keys. It must compute the same
+structured `KeyMaterialKey` values that physical generation will later use.
+
+Required behavior:
+
+1. the planner constructs legal target parameters for every declared target and
+   candidate owner;
+2. the planner derives the candidate owner's bootstrap secret domain descriptor;
+3. the planner computes all key descriptors needed to build each target's
+   `EvaluationKeys`;
+4. for each target, the planner selects one bootstrap secret domain and emits a
+   complete target manifest;
+5. an owner hint contributes only if at least one physical descriptor owned by
+   that hint is referenced by one or more target manifests;
+6. owner hints that contribute only logical wrapper objects, report rows, or DFT
+   diagnostics do not count as contributing key material;
+7. unused owner hints are rejected before physical key generation with
+   `unused_key_material_owner_hint`.
+
+### 4.5 Target Manifest
 
 Every declared target level has exactly one key manifest.
 
@@ -193,6 +278,17 @@ for that target:
 
 If a target manifest is missing any required key, evaluator construction must
 fail before runtime bootstrap.
+
+All keys referenced by the manifest must match the manifest's
+`BootstrapSecretDomain` through `KeyMaterialKey.BootstrapSecretDomain`.
+For relinearization and rotation keys, `SecretDomain` must also equal the
+manifest bootstrap domain. For ring/domain and dense/sparse switch keys,
+`SecretDomain` is the key-specific source/destination domain descriptor; it is
+compatible with the manifest only when `BootstrapSecretDomain` equals the
+manifest bootstrap domain and the source/destination descriptor encodes that
+same selected owner bootstrap domain. Private switch keys are private because
+their target residual or sparse secret differs, not because they introduce a
+second bootstrap secret domain into the manifest.
 
 ## 5. Target Evaluator Assembly
 
@@ -273,10 +369,15 @@ A7 may share dense/sparse encapsulation keys only when:
 
 ### 6.5 RNS Prefix Views
 
-RNS prefix views are disabled by default. When enabled, they apply only to key
-material kinds with explicit positive and negative tests. Prefix views must not
-be inferred for DFT matrices, linear transformations, schedules, or encoded
-diagonals.
+RNS prefix views are not part of A7 v1. `ReuseKeyMaterialPoolTargetEvaluator`
+may share only exact physical key material whose structured identity matches.
+`BuildTargetEvaluationKeys` must reject `KeyMaterialViewRNSPrefix` manifests
+with `ErrIncompatibleReusableMaterial`.
+
+RNS-prefix reuse remains covered by the A5/A6 evidence chain and may be
+promoted into a later policy only after every key material kind has positive and
+negative compatibility tests. Prefix views must not be inferred for DFT
+matrices, linear transformations, schedules, or encoded diagonals.
 
 ## 7. Reporting and Benchmarks
 
@@ -333,11 +434,13 @@ Fast acceptance tests:
 8. `TestKeyMaterialPoolAddsOnlyKeyMaterialKinds`.
 9. `TestBuildTargetEvaluationKeysUsesManifestKeys`.
 10. `TestBuildTargetEvaluationKeysRejectsMissingKeyMaterial`.
-11. `TestBuildTargetEvaluatorUsesDedicatedTargetEvaluator`.
-12. `TestBuildTargetEvaluatorAllowsNewEvaluatorDFTGeneration`.
-13. `TestTargetLevelBootstrapperKeyMaterialPoolUsesDedicatedTargetEvaluator`.
-14. `TestA7PlanReportExplainsSharedAndPrivateKeyMaterial`.
-15. `TestTargetCountSweepIncludesKeyMaterialPoolScheme`.
+11. `TestBuildTargetEvaluationKeysRejectsMixedBootstrapSecretDomain`.
+12. `TestBuildTargetEvaluationKeysRejectsRNSPrefixView`.
+13. `TestBuildTargetEvaluatorUsesDedicatedTargetEvaluator`.
+14. `TestBuildTargetEvaluatorAllowsNewEvaluatorDFTGeneration`.
+15. `TestTargetLevelBootstrapperKeyMaterialPoolUsesDedicatedTargetEvaluator`.
+16. `TestA7PlanReportExplainsSharedAndPrivateKeyMaterial`.
+17. `TestTargetCountSweepIncludesKeyMaterialPoolScheme`.
 
 Negative acceptance tests:
 
@@ -346,6 +449,8 @@ Negative acceptance tests:
 3. No `encoded_diagonal` material kind is required by A7.
 4. Missing DFT material must not prevent target evaluator construction.
 5. `NewEvaluatorFromMaterialBundle` must not be introduced for A7.
+6. `KeyMaterialViewRNSPrefix` must not be accepted by A7 v1 target evaluator
+   assembly.
 
 ## 9. Completion Criteria
 
@@ -364,3 +469,9 @@ A7 is complete only when:
    not part of A7 physical reuse.
 10. Reports and benchmarks measure key material size separately from optional
    DFT diagnostics.
+11. Descriptor-only planning rejects unused owner hints before physical key
+    generation.
+12. Every target manifest uses one bootstrap secret domain and rejects mixed
+    domains.
+13. A7 has an all-legal-target correctness gate for at least one fast profile
+    and one long profile.

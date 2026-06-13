@@ -76,6 +76,10 @@ target_count_sweep_results.csv
 | `shared_key_material_count` | 辅助解释 key-set 复用程度 |
 | `private_key_material_count` | 辅助解释 target-private key-set 物料 |
 | `target_evaluator_count` | A7 必须等于 `target_count` |
+| `key_material_owner_hint_count` | A7 owner hint 数量 |
+| `contributing_key_material_owner_count` | 真实贡献 physical key material 的 owner 数量 |
+| `target_manifest_count` | A7 target manifest 数量，必须等于 `target_count` |
+| `bootstrap_secret_domain_count` | A7 manifest 使用的 distinct bootstrap secret domain 数量 |
 | `correctness_pass` | 该行是否通过 level/scale/precision 校验 |
 
 `key_material_total_bytes` 是对象级统计口径：
@@ -106,6 +110,14 @@ schedule 或 encoded diagonal。
 因为它们是物理上独立的对象。
 
 DFT encoded diagonal 大小可以作为诊断列输出，但不得计入 key material 总大小。
+
+`contributing_key_material_owner_count` 只能统计 descriptor-only requirement
+plan 证明会贡献 physical key material 的 owner。只出现在报告字段、logical
+wrapper 或 DFT diagnostic 中的 owner 不得计入。
+
+`bootstrap_secret_domain_count` 用于审计 target manifest 是否围绕 coherent
+bootstrap secret domain 组装。每个 manifest 内必须只有一个 bootstrap secret
+domain；该列不得大于 `target_manifest_count`。
 
 ## 4. 三张性能表
 

@@ -114,25 +114,34 @@ type bkrTargetCountSweepCase struct {
 }
 
 type bkrTargetCountSweepResult struct {
-	SchemaVersion          string
-	ProfileID              string
-	CaseID                 string
-	TargetCount            int
-	TargetCountLabel       string
-	TargetLevels           []int
-	Scheme                 string
-	MaterialTotalMB        float64
-	KeyPreparationTimeS    float64
-	TotalBootstrapTimeS    float64
-	MeanBootstrapLatencyMS float64
-	OwnerTargetLevels      []int
-	PhysicalMaterialCount  int
-	SharedMaterialCount    int
-	CorrectnessPass        bool
-	GoVersion              string
-	GOMAXPROCS             int
-	Commit                 string
-	DirtyState             string
+	SchemaVersion                     string
+	ProfileID                         string
+	CaseID                            string
+	TargetCount                       int
+	TargetCountLabel                  string
+	TargetLevels                      []int
+	Scheme                            string
+	MaterialTotalBytes                int64
+	MaterialTotalMB                   float64
+	SharedMaterialMB                  float64
+	PrivateMaterialMB                 float64
+	KeyPreparationTimeS               float64
+	TotalBootstrapTimeS               float64
+	MeanBootstrapLatencyMS            float64
+	OwnerTargetLevels                 []int
+	PhysicalMaterialCount             int
+	SharedMaterialCount               int
+	PrivateMaterialCount              int
+	TargetEvaluatorCount              int
+	KeyMaterialOwnerHintCount         int
+	ContributingKeyMaterialOwnerCount int
+	TargetManifestCount               int
+	BootstrapSecretDomainCount        int
+	CorrectnessPass                   bool
+	GoVersion                         string
+	GOMAXPROCS                        int
+	Commit                            string
+	DirtyState                        string
 }
 
 func bkrResearchBenchmarkSuiteManifest() []bkrResearchBenchmarkCase {
@@ -367,13 +376,22 @@ func bkrTargetCountSweepCSVHeader() []string {
 		"target_count_label",
 		"target_levels",
 		"scheme",
-		"material_total_mb",
+		"key_material_total_bytes",
+		"key_material_total_mb",
+		"shared_key_material_mb",
+		"private_key_material_mb",
 		"key_preparation_time_s",
 		"total_bootstrap_time_s",
 		"mean_bootstrap_latency_ms",
 		"owner_target_levels",
 		"physical_material_count",
 		"shared_material_count",
+		"private_key_material_count",
+		"target_evaluator_count",
+		"key_material_owner_hint_count",
+		"contributing_key_material_owner_count",
+		"target_manifest_count",
+		"bootstrap_secret_domain_count",
 		"correctness_pass",
 		"go_version",
 		"gomaxprocs",
@@ -426,7 +444,7 @@ func bkrWriteTargetCountSweepSmokeReport(t *testing.T, dir string) ([]bkrTargetC
 	}
 	tc := bkrTargetCountSweepSmokeCase()
 	rows := make([]bkrTargetCountSweepResult, 0, 2)
-	for _, scheme := range []string{"original_lattigo", "ours_reusable_planner"} {
+	for _, scheme := range []string{"original_lattigo", "ours_key_material_pool_target_evaluator"} {
 		row, err := bkrRunTargetCountSweepScheme(t, tc, scheme)
 		if err != nil {
 			return nil, err
@@ -601,7 +619,7 @@ func bkrRunTargetCountSweepScheme(t testing.TB, tc bkrTargetCountSweepCase, sche
 	switch scheme {
 	case "original_lattigo":
 		return bkrRunTargetCountSweepOriginal(t, tc)
-	case "ours_reusable_planner":
+	case "ours_key_material_pool_target_evaluator":
 		return bkrRunTargetCountSweepPlanner(t, tc)
 	default:
 		return bkrTargetCountSweepResult{}, fmt.Errorf("unknown target-count sweep scheme %q", scheme)
@@ -653,7 +671,14 @@ func bkrRunTargetCountSweepOriginal(t testing.TB, tc bkrTargetCountSweepCase) (b
 		}
 	}
 
-	return bkrTargetCountSweepResultFromMetrics(tc, "original_lattigo", materialBytes, keyPrepElapsed, bootstrapElapsed, append([]int(nil), tc.TargetLevels...), tc.TargetCount, 0, correctnessPass), nil
+	result := bkrTargetCountSweepResultFromMetrics(tc, "original_lattigo", materialBytes, 0, materialBytes, keyPrepElapsed, bootstrapElapsed, append([]int(nil), tc.TargetLevels...), tc.TargetCount, 0, correctnessPass)
+	result.PrivateMaterialCount = tc.TargetCount
+	result.TargetEvaluatorCount = tc.TargetCount
+	result.KeyMaterialOwnerHintCount = tc.TargetCount
+	result.ContributingKeyMaterialOwnerCount = tc.TargetCount
+	result.TargetManifestCount = tc.TargetCount
+	result.BootstrapSecretDomainCount = tc.TargetCount
+	return result, nil
 }
 
 func bkrRunTargetCountSweepPlanner(t testing.TB, tc bkrTargetCountSweepCase) (bkrTargetCountSweepResult, error) {
@@ -679,9 +704,7 @@ func bkrRunTargetCountSweepPlanner(t testing.TB, tc bkrTargetCountSweepCase) (bk
 		FullResidualParameters: fullParams,
 		BootstrappingLiteral:   btpLiteral,
 		FutureTargetLevels:     append([]int(nil), tc.TargetLevels...),
-		ReusePolicy:            ReuseExactPrefixAndSupersetDrop,
-		EnableRNSSliceViews:    true,
-		AllowSupersetDrop:      true,
+		ReusePolicy:            ReuseKeyMaterialPoolTargetEvaluator,
 	}
 	plan, err = NewTargetLevelMaterialPlan(req)
 	if err != nil {
@@ -714,17 +737,28 @@ func bkrRunTargetCountSweepPlanner(t testing.TB, tc bkrTargetCountSweepCase) (bk
 		if err != nil {
 			return bkrTargetCountSweepResult{}, err
 		}
-		if _, err := bkrValidateBootstrapKeyReuseOutputs(t, "TargetCountSweep/ours_reusable_planner", tc.Spec, targetLevel, targetLevel, residualParams, []rlwe.Ciphertext{*out}, [][]complex128{values}); err != nil {
+		if _, err := bkrValidateBootstrapKeyReuseOutputs(t, "TargetCountSweep/ours_key_material_pool_target_evaluator", tc.Spec, targetLevel, targetLevel, residualParams, []rlwe.Ciphertext{*out}, [][]complex128{values}); err != nil {
 			correctnessPass = false
 			return bkrTargetCountSweepResult{}, err
 		}
 	}
 
 	report := bootstrapper.PlanReport()
-	return bkrTargetCountSweepResultFromMetrics(tc, "ours_reusable_planner", bkrResearchPersistentKeyBytes(keys), keyPrepElapsed, bootstrapElapsed, report.OwnerTargetLevels, bkrResearchPhysicalMaterialCount(keys.SharedKeyPool()), bkrResearchCountMapSum(report.SharedCounts), correctnessPass), nil
+	pool := keys.KeyMaterialPool()
+	if pool == nil {
+		return bkrTargetCountSweepResult{}, fmt.Errorf("key material pool is nil")
+	}
+	result := bkrTargetCountSweepResultFromMetrics(tc, "ours_key_material_pool_target_evaluator", int64(pool.MaterialBinarySize()), int64(pool.SharedMaterialBinarySize()), int64(pool.PrivateMaterialBinarySize()), keyPrepElapsed, bootstrapElapsed, report.OwnerTargetLevels, pool.PhysicalMaterialCount(), pool.SharedMaterialCount(), correctnessPass)
+	result.PrivateMaterialCount = pool.PrivateMaterialCount()
+	result.TargetEvaluatorCount = report.TargetEvaluatorCount
+	result.KeyMaterialOwnerHintCount = report.KeyMaterialOwnerHintCount
+	result.ContributingKeyMaterialOwnerCount = report.ContributingKeyMaterialOwnerCount
+	result.TargetManifestCount = report.TargetManifestCount
+	result.BootstrapSecretDomainCount = report.BootstrapSecretDomainCount
+	return result, nil
 }
 
-func bkrTargetCountSweepResultFromMetrics(tc bkrTargetCountSweepCase, scheme string, materialBytes int64, keyPrepElapsed, bootstrapElapsed time.Duration, ownerTargetLevels []int, physicalMaterialCount, sharedMaterialCount int, correctnessPass bool) bkrTargetCountSweepResult {
+func bkrTargetCountSweepResultFromMetrics(tc bkrTargetCountSweepCase, scheme string, materialBytes, sharedMaterialBytes, privateMaterialBytes int64, keyPrepElapsed, bootstrapElapsed time.Duration, ownerTargetLevels []int, physicalMaterialCount, sharedMaterialCount int, correctnessPass bool) bkrTargetCountSweepResult {
 	_, commit, dirty := bkrGitMetadata()
 	return bkrTargetCountSweepResult{
 		SchemaVersion:          bkrTargetCountSweepSchemaVersion,
@@ -734,7 +768,10 @@ func bkrTargetCountSweepResultFromMetrics(tc bkrTargetCountSweepCase, scheme str
 		TargetCountLabel:       tc.TargetCountLabel,
 		TargetLevels:           append([]int(nil), tc.TargetLevels...),
 		Scheme:                 scheme,
+		MaterialTotalBytes:     materialBytes,
 		MaterialTotalMB:        bkrBytesToMiB(materialBytes),
+		SharedMaterialMB:       bkrBytesToMiB(sharedMaterialBytes),
+		PrivateMaterialMB:      bkrBytesToMiB(privateMaterialBytes),
 		KeyPreparationTimeS:    bkrDurationSeconds(keyPrepElapsed),
 		TotalBootstrapTimeS:    bkrDurationSeconds(bootstrapElapsed),
 		MeanBootstrapLatencyMS: bkrDurationMS(bootstrapElapsed) / float64(tc.TargetCount),
@@ -793,7 +830,7 @@ func BenchmarkTargetCountSweep(b *testing.B) {
 		}
 		tc := tc
 		b.Run(tc.Name, func(b *testing.B) {
-			for _, scheme := range []string{"original_lattigo", "ours_reusable_planner"} {
+			for _, scheme := range []string{"original_lattigo", "ours_key_material_pool_target_evaluator"} {
 				scheme := scheme
 				b.Run(scheme, func(b *testing.B) {
 					bkrBenchmarkTargetCountSweepScheme(b, tc, scheme)
@@ -807,6 +844,9 @@ func bkrBenchmarkTargetCountSweepScheme(b *testing.B, tc bkrTargetCountSweepCase
 	b.ReportAllocs()
 
 	var materialTotalMB float64
+	var materialTotalBytes float64
+	var sharedMaterialMB float64
+	var privateMaterialMB float64
 	var keyPreparationTimeS float64
 	var totalBootstrapTimeS float64
 	var meanBootstrapLatencyMS float64
@@ -822,6 +862,9 @@ func bkrBenchmarkTargetCountSweepScheme(b *testing.B, tc bkrTargetCountSweepCase
 			b.Fatal(err)
 		}
 		materialTotalMB += result.MaterialTotalMB
+		materialTotalBytes += float64(result.MaterialTotalBytes)
+		sharedMaterialMB += result.SharedMaterialMB
+		privateMaterialMB += result.PrivateMaterialMB
 		keyPreparationTimeS += result.KeyPreparationTimeS
 		totalBootstrapTimeS += result.TotalBootstrapTimeS
 		meanBootstrapLatencyMS += result.MeanBootstrapLatencyMS
@@ -834,7 +877,10 @@ func bkrBenchmarkTargetCountSweepScheme(b *testing.B, tc bkrTargetCountSweepCase
 
 	n := float64(b.N)
 	avg := lastResult
+	avg.MaterialTotalBytes = int64(materialTotalBytes / n)
 	avg.MaterialTotalMB = materialTotalMB / n
+	avg.SharedMaterialMB = sharedMaterialMB / n
+	avg.PrivateMaterialMB = privateMaterialMB / n
 	avg.KeyPreparationTimeS = keyPreparationTimeS / n
 	avg.TotalBootstrapTimeS = totalBootstrapTimeS / n
 	avg.MeanBootstrapLatencyMS = meanBootstrapLatencyMS / n
@@ -842,7 +888,10 @@ func bkrBenchmarkTargetCountSweepScheme(b *testing.B, tc bkrTargetCountSweepCase
 	avg.SharedMaterialCount = int(sharedMaterialCount / n)
 	avg.CorrectnessPass = correctnessPass
 
-	b.ReportMetric(avg.MaterialTotalMB, "material_total_mb")
+	b.ReportMetric(avg.MaterialTotalMB, "key_material_total_mb")
+	b.ReportMetric(float64(avg.MaterialTotalBytes), "key_material_total_bytes")
+	b.ReportMetric(avg.SharedMaterialMB, "shared_key_material_mb")
+	b.ReportMetric(avg.PrivateMaterialMB, "private_key_material_mb")
 	b.ReportMetric(avg.KeyPreparationTimeS, "key_prep_s")
 	b.ReportMetric(avg.TotalBootstrapTimeS, "total_bootstrap_s")
 	b.ReportMetric(avg.MeanBootstrapLatencyMS, "mean_bootstrap_ms")
@@ -1169,13 +1218,22 @@ func (r bkrTargetCountSweepResult) csvRow() []string {
 		r.TargetCountLabel,
 		bkrJoinInts(r.TargetLevels),
 		r.Scheme,
+		strconv.FormatInt(r.MaterialTotalBytes, 10),
 		bkrFormatFloat(r.MaterialTotalMB),
+		bkrFormatFloat(r.SharedMaterialMB),
+		bkrFormatFloat(r.PrivateMaterialMB),
 		bkrFormatFloat(r.KeyPreparationTimeS),
 		bkrFormatFloat(r.TotalBootstrapTimeS),
 		bkrFormatFloat(r.MeanBootstrapLatencyMS),
 		bkrJoinInts(r.OwnerTargetLevels),
 		strconv.Itoa(r.PhysicalMaterialCount),
 		strconv.Itoa(r.SharedMaterialCount),
+		strconv.Itoa(r.PrivateMaterialCount),
+		strconv.Itoa(r.TargetEvaluatorCount),
+		strconv.Itoa(r.KeyMaterialOwnerHintCount),
+		strconv.Itoa(r.ContributingKeyMaterialOwnerCount),
+		strconv.Itoa(r.TargetManifestCount),
+		strconv.Itoa(r.BootstrapSecretDomainCount),
 		strconv.FormatBool(r.CorrectnessPass),
 		r.GoVersion,
 		strconv.Itoa(r.GOMAXPROCS),
